@@ -13,13 +13,18 @@ export default function BoardPage() {
   useKeyboardShortcuts();
 
   return (
-    <main className="w-screen h-screen overflow-hidden bg-zinc-950 text-zinc-50 flex flex-col relative select-none">
+    <main className="w-screen h-screen overflow-hidden bg-zinc-950 text-zinc-50 relative select-none">
+      {/* Toolbar - fixed, not inside canvas */}
       <AdvancedToolbar />
+
+      {/* Panels - fixed, not inside canvas */}
       <LayersPanel />
       <PropertiesPanel />
-      <div className="flex-1 w-full h-full relative cursor-crosshair">
-        <Canvas />
-      </div>
+
+      {/* Canvas fills the whole screen */}
+      <Canvas />
+
+      {/* Status bar */}
       <StatusBar />
     </main>
   );

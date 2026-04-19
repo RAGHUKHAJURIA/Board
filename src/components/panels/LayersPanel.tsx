@@ -2,7 +2,7 @@
 
 import React from 'react';
 import { motion } from 'framer-motion';
-import { Layers, X, Square, Circle, Triangle, Minus, ArrowRight, Pen, Hexagon, Download, FileJson } from 'lucide-react';
+import { Layers, X, Square, Circle, Triangle, Minus, ArrowRight, Pen, Hexagon, Download, FileJson, GripHorizontal, ChevronLeft } from 'lucide-react';
 import { useCanvasStore } from '@/store/canvas-store';
 import { useUIStore } from '@/store/ui-store';
 import { ShapeType } from '@/types';
@@ -18,7 +18,18 @@ export function LayersPanel() {
   const grid = useUIStore(state => state.grid);
   const togglePanel = useUIStore(state => state.togglePanel);
 
-  if (!panels.layers) return null;
+  if (!panels.layers) {
+    return (
+      <button 
+        onClick={() => togglePanel('layers')}
+        className="fixed right-0 top-32 bg-zinc-900/90 backdrop-blur-md border border-zinc-800 border-r-0 rounded-l-lg p-2 py-3 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 shadow-xl z-40 pointer-events-auto flex items-center gap-1 transition-all"
+        title="Restore Layers Panel"
+      >
+        <ChevronLeft size={16} />
+        <Layers size={16} />
+      </button>
+    );
+  }
 
   // Render elements in reverse z-index order (top on top)
   const sortedElements = Object.values(elements).sort((a, b) => b.zIndex - a.zIndex);
@@ -54,13 +65,17 @@ export function LayersPanel() {
 
   return (
     <motion.div
-      initial={{ x: -300, opacity: 0 }}
-      animate={{ x: 0, opacity: 1 }}
-      exit={{ x: -300, opacity: 0 }}
-      className="fixed left-4 top-20 w-64 bg-zinc-900/90 backdrop-blur-md border border-zinc-800 rounded-xl shadow-xl flex flex-col z-30"
+      drag
+      dragMomentum={false}
+      initial={{ opacity: 0, scale: 0.95 }}
+      animate={{ opacity: 1, scale: 1 }}
+      exit={{ opacity: 0, scale: 0.95 }}
+      transition={{ duration: 0.15 }}
+      className="fixed left-20 top-20 w-64 bg-zinc-900/90 backdrop-blur-md border border-zinc-800 rounded-xl shadow-xl flex flex-col z-30 pointer-events-auto"
     >
-      <div className="flex items-center justify-between p-3 border-b border-zinc-800">
+      <div className="flex items-center justify-between p-3 border-b border-zinc-800 cursor-grab active:cursor-grabbing">
         <h3 className="text-sm font-semibold text-zinc-200 flex items-center gap-2">
+          <GripHorizontal size={14} className="text-zinc-500" />
           <Layers size={16} /> Layers
         </h3>
         <button onClick={() => togglePanel('layers')} className="text-zinc-500 hover:text-zinc-300">

@@ -59,9 +59,22 @@ export const renderCanvas = (
       imageHandler.drawImage(ctx, element as ImageElement);
     } else if (element.type === ShapeType.TEXT) {
       const textEl = element as TextElement;
-      ctx.font = `${textEl.fontSize}px ${textEl.fontFamily}`;
-      ctx.fillStyle = textEl.color;
-      ctx.fillText(textEl.text, textEl.x, textEl.y);
+      const fontSize = textEl.fontSize || 18;
+      const fontFamily = textEl.fontFamily || 'Inter, sans-serif';
+      ctx.font = `${fontSize}px ${fontFamily}`;
+      ctx.fillStyle = textEl.color || textEl.style.stroke;
+      ctx.globalAlpha = textEl.style.opacity;
+      ctx.textBaseline = 'top';
+      
+      // Multi-line text support
+      const lines = (textEl.text || '').split('\n');
+      const lineHeight = fontSize * 1.4;
+      lines.forEach((line, i) => {
+        ctx.fillText(line, textEl.x, textEl.y + i * lineHeight);
+      });
+      
+      ctx.globalAlpha = 1;
+
     } else if (element.type === ShapeType.CONNECTOR) {
       connectorManager.drawConnector(ctx, element as ConnectorElement, roughRenderer);
     } else {

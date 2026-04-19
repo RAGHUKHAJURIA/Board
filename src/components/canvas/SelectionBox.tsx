@@ -18,7 +18,7 @@ export function SelectionBox({ box, viewport, rotation = 0, onResizeStart, onRot
   const screenW = (box.maxX - box.minX) * viewport.zoom;
   const screenH = (box.maxY - box.minY) * viewport.zoom;
 
-  const padding = 10 * viewport.zoom;
+  const padding = 10; // fixed screen-pixel padding, don't multiply by zoom!
   
   const style: React.CSSProperties = {
     position: 'absolute',
