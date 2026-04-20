@@ -49,7 +49,8 @@ export const useUIStore = create<UIState>()(
       strokeWidth: 2,
       opacity: 1,
       roughness: 1,
-      strokeStyle: 'solid'
+      strokeStyle: 'solid',
+      penType: 'pen'
     },
     
     togglePanel: (panel) => set((state) => {

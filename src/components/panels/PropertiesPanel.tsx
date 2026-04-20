@@ -71,7 +71,7 @@ export function PropertiesPanel() {
         </button>
       </div>
 
-      <div className="p-4 flex flex-col gap-5 max-h-[calc(100vh-140px)] overflow-y-auto">
+      <div className="p-4 flex flex-col gap-5">
 
         {/* Transform */}
         <div className="flex flex-col gap-3">

@@ -6,15 +6,25 @@ interface ColorPickerProps {
   onChange: (color: string) => void;
   label?: string;
   allowTransparent?: boolean;
+  position?: 'bottom' | 'right' | 'left' | 'top';
 }
 
-const PRESET_COLORS = [
-  '#ef4444', '#f97316', '#f59e0b', '#84cc16', '#22c55e', '#14b8a6', 
-  '#06b6d4', '#0ea5e9', '#3b82f6', '#6366f1', '#8b5cf6', '#d946ef',
-  '#f43f5e', '#1e293b', '#64748b', '#cbd5e1', '#ffffff'
+export const PRESET_COLORS = [
+  // Grayscale
+  '#ffffff', '#f8fafc', '#e2e8f0', '#94a3b8', '#64748b', '#334155', '#0f172a', '#000000',
+  // Reds & Pinks
+  '#fecdd3', '#fda4af', '#f43f5e', '#e11d48', '#be123c', '#fce7f3', '#f472b6', '#db2777',
+  // Oranges & Yellows
+  '#fed7aa', '#fb923c', '#ea580c', '#c2410c', '#fef08a', '#fde047', '#eab308', '#ca8a04',
+  // Greens
+  '#dcfce7', '#86efac', '#22c55e', '#16a34a', '#15803d', '#d9f99d', '#a3e635', '#65a30d',
+  // Cyans & Blues
+  '#cffafe', '#67e8f9', '#06b6d4', '#0891b2', '#bfdbfe', '#60a5fa', '#3b82f6', '#2563eb',
+  // Purples
+  '#e9d5ff', '#c084fc', '#a855f7', '#7e22ce', '#ede9fe', '#a78bfa', '#8b5cf6', '#6d28d9'
 ];
 
-export function ColorPicker({ color, onChange, label, allowTransparent }: ColorPickerProps) {
+export function ColorPicker({ color, onChange, label, allowTransparent, position = 'bottom' }: ColorPickerProps) {
   const [isOpen, setIsOpen] = useState(false);
   const popoverRef = useRef<HTMLDivElement>(null);
 
@@ -50,7 +60,14 @@ export function ColorPicker({ color, onChange, label, allowTransparent }: ColorP
       {isOpen && (
         <div 
           ref={popoverRef}
-          className="absolute top-full mt-2 left-1/2 -translate-x-1/2 z-50 p-3 bg-zinc-900 border border-zinc-800 rounded-xl shadow-xl flex flex-col gap-3 w-[220px]"
+          onPointerDownCapture={(e) => e.stopPropagation()}
+          onPointerMoveCapture={(e) => e.stopPropagation()}
+          className={`absolute z-50 p-3 bg-zinc-900 border border-zinc-800 rounded-xl shadow-xl flex flex-col gap-3 w-[220px] ${
+            position === 'right' ? 'left-full ml-4 top-1/2 -translate-y-1/2' :
+            position === 'left' ? 'right-full mr-4 top-1/2 -translate-y-1/2' :
+            position === 'top' ? 'bottom-full mb-2 left-1/2 -translate-x-1/2' :
+            'top-full mt-2 left-1/2 -translate-x-1/2' // default bottom
+          }`}
         >
           {allowTransparent && (
             <button 

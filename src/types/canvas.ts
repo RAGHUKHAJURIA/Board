@@ -30,6 +30,7 @@ export interface StyleProperties {
   opacity: number;
   roughness: number;
   strokeStyle: 'solid' | 'dashed' | 'dotted';
+  penType?: 'pen' | 'pencil' | 'fountain' | 'marker' | 'highlighter';
 }
 
 export interface BaseElement {

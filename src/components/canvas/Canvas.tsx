@@ -331,7 +331,8 @@ export function Canvas() {
 
     switch (modeRef.current) {
       case 'panning': {
-        updateViewport({ x: viewport.x + dx, y: viewport.y + dy });
+        const vp = useCanvasStore.getState().viewport;
+        useCanvasStore.getState().updateViewport({ x: vp.x + dx, y: vp.y + dy });
         break;
       }
 
@@ -356,8 +357,9 @@ export function Canvas() {
         const wdx = world.x - screenToWorld(lastPointerPos.current.x, lastPointerPos.current.y).x;
         const wdy = world.y - screenToWorld(lastPointerPos.current.x, lastPointerPos.current.y).y;
         // Move all selected elements
+        const freshElements = useCanvasStore.getState().elements;
         Object.keys(dragStartElementPositions.current).forEach((id) => {
-          const el = elements[id];
+          const el = freshElements[id];
           if (el) updateElement(id, { x: el.x + wdx, y: el.y + wdy });
           // Keep our start positions in sync so we can call saveSnapshot later
           if (dragStartElementPositions.current[id]) {
@@ -377,7 +379,7 @@ export function Canvas() {
         const wdx = world.x - prevWorld.x;
         const wdy = world.y - prevWorld.y;
 
-        const el = elements[elId];
+        const el = useCanvasStore.getState().elements[elId];
         if (!el) break;
 
         const newBounds = calcResizedBounds(handle, el.x, el.y, el.width, el.height, wdx, wdy, e.shiftKey);
@@ -484,11 +486,11 @@ export function Canvas() {
   const viewportRef = useRef(viewport);
   useEffect(() => { viewportRef.current = viewport; }, [viewport]);
 
-  // 1. GLOBAL guard: block Ctrl+scroll browser page-zoom everywhere on the page.
+  // 1. GLOBAL guard: block browser page-zoom everywhere on the page.
   //    Without this, the browser zooms the entire page (sidebar, panels, etc.)
-  //    even when our canvas-level handler fires.
   useEffect(() => {
     const blockBrowserZoom = (e: WheelEvent) => {
+      // Block Ctrl+scroll (browser zoom) and also plain scroll when over canvas
       if (e.ctrlKey || e.metaKey) {
         e.preventDefault();
       }
@@ -499,21 +501,29 @@ export function Canvas() {
   }, []);
 
   // 2. CANVAS-level handler: translates wheel events into viewport pan / zoom.
+  //    Plain scroll = zoom (smooth, around cursor). Shift+scroll = pan.
+  //    Ctrl+scroll / pinch = also zoom (trackpad). This keeps selection stable.
   const handleWheelNative = useCallback((e: WheelEvent) => {
-    e.preventDefault(); // redundant with above but keeps this self-contained
-    const vp = viewportRef.current;
-    if (e.ctrlKey || e.metaKey) {
-      // Pinch-to-zoom / Ctrl+scroll → smooth zoom around the cursor position
-      // Use continuous deltaY for buttery-smooth trackpad zooming
-      const zoomFactor = Math.exp(-e.deltaY / 300);
+    e.preventDefault();
+    e.stopPropagation();
+    const vp = useCanvasStore.getState().viewport;
+
+    if (e.shiftKey && !e.ctrlKey && !e.metaKey) {
+      // Shift+scroll → horizontal pan
+      updateViewport({ x: vp.x - e.deltaY, y: vp.y - e.deltaX });
+    } else {
+      // Default scroll / Ctrl+scroll / pinch → smooth zoom around cursor
+      // Use a sensitivity that works well for both mice and trackpads.
+      // Ctrl+scroll (trackpad pinch) sends small deltaY, plain mouse scroll
+      // sends larger deltaY (typically ±100). Normalise both cases.
+      const isTrackpadPinch = e.ctrlKey || e.metaKey;
+      const sensitivity = isTrackpadPinch ? 300 : 150;
+      const zoomFactor = Math.exp(-e.deltaY / sensitivity);
       const newZoom = Math.max(0.05, Math.min(vp.zoom * zoomFactor, 10));
       const scale = newZoom / vp.zoom;
       const newX = e.clientX - (e.clientX - vp.x) * scale;
       const newY = e.clientY - (e.clientY - vp.y) * scale;
       updateViewport({ zoom: newZoom, x: newX, y: newY });
-    } else {
-      // Plain scroll → pan
-      updateViewport({ x: vp.x - e.deltaX, y: vp.y - e.deltaY });
     }
   }, [updateViewport]);
 
@@ -667,13 +677,12 @@ export function Canvas() {
       ref={containerRef}
       className="absolute inset-0 bg-zinc-950 touch-none"
       style={{ cursor: getCursor(), overflow: 'hidden' }}
+      onPointerMove={handlePointerMove}
+      onPointerUp={handlePointerUp}
     >
       <canvas
         ref={canvasRef}
         onPointerDown={handlePointerDown}
-        onPointerMove={handlePointerMove}
-        onPointerUp={handlePointerUp}
-        onPointerLeave={handlePointerUp}
         onDoubleClick={handleDoubleClick}
         className="absolute inset-0"
         style={{ touchAction: 'none' }}
@@ -688,6 +697,9 @@ export function Canvas() {
           isMultiple={activeSelectionBox.isMultiple}
           onResizeStart={(e, handle) => {
             e.stopPropagation();
+            // Capture pointer on the container so move/up events keep firing
+            // even if the pointer leaves the window during a drag.
+            containerRef.current?.setPointerCapture(e.pointerId);
             const el = getSelectedElements()[0];
             if (!el) return;
             resizeHandleRef.current = handle;
@@ -698,6 +710,8 @@ export function Canvas() {
           }}
           onRotateStart={(e) => {
             e.stopPropagation();
+            // Capture pointer on the container so move/up events keep firing
+            containerRef.current?.setPointerCapture(e.pointerId);
             const world = screenToWorld(e.clientX, e.clientY);
             const el = getSelectedElements()[0];
             if (!el) return;
