@@ -94,9 +94,14 @@
 }
 
 @layer utilities {
+  /* Thin vertical-only scrollbar that doesn't overlap content */
+  .custom-scrollbar {
+    overflow-x: hidden !important;
+    scrollbar-gutter: stable both-edges;
+  }
   .custom-scrollbar::-webkit-scrollbar {
-    width: 6px;
-    height: 6px;
+    width: 4px;
+    height: 0px; /* no horizontal scrollbar */
   }
   .custom-scrollbar::-webkit-scrollbar-track {
     background: transparent;
@@ -107,5 +112,8 @@
   }
   .custom-scrollbar::-webkit-scrollbar-thumb:hover {
     background: #52525b;
+  }
+  .custom-scrollbar::-webkit-scrollbar-corner {
+    background: transparent;
   }
 }

@@ -20,7 +20,8 @@ type InteractionMode =
   | 'dragging'
   | 'resizing'
   | 'rotating'
-  | 'text-editing';
+  | 'text-editing'
+  | 'erasing';
 
 export function Canvas() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -34,6 +35,7 @@ export function Canvas() {
 
   const currentStyle = useUIStore(state => state.currentStyle);
   const grid = useUIStore(state => state.grid);
+  const eraserSettings = useUIStore(state => state.eraser);
 
   // Interaction state
   const modeRef = useRef<InteractionMode>('idle');
@@ -136,6 +138,83 @@ export function Canvas() {
       .map(id => elements[id])
       .filter(Boolean) as WhiteboardElement[];
 
+  // Partial eraser: splits freehand strokes where eraser touches, deletes other elements
+  const performPartialErase = (world: Point, radius: number) => {
+    const freshEls = useCanvasStore.getState().elements;
+    const sortedEls = Object.values(freshEls).sort((a, b) => b.zIndex - a.zIndex);
+
+    for (const el of sortedEls) {
+      if (el.type === ShapeType.FREEHAND) {
+        const fh = el as FreehandElement;
+        // Check if any point is within eraser radius
+        const hitIdx = fh.points.findIndex(([px, py]) => Math.hypot(world.x - px, world.y - py) < radius);
+        if (hitIdx === -1) continue;
+
+        // Split the stroke: remove points within the eraser radius and create new strokes from remaining segments
+        const remaining: [number, number, number?][][] = [];
+        let currentSegment: [number, number, number?][] = [];
+
+        for (const pt of fh.points) {
+          const [px, py] = pt;
+          if (Math.hypot(world.x - px, world.y - py) < radius) {
+            // This point is erased — break the segment
+            if (currentSegment.length >= 2) {
+              remaining.push([...currentSegment]);
+            }
+            currentSegment = [];
+          } else {
+            currentSegment.push(pt);
+          }
+        }
+        if (currentSegment.length >= 2) {
+          remaining.push(currentSegment);
+        }
+
+        // Delete the original stroke
+        deleteElements([el.id]);
+
+        // Create new stroke elements from remaining segments
+        for (const segment of remaining) {
+          const xs = segment.map(([x]) => x);
+          const ys = segment.map(([, y]) => y);
+          const minX = Math.min(...xs);
+          const minY = Math.min(...ys);
+          const maxX = Math.max(...xs);
+          const maxY = Math.max(...ys);
+
+          const newId = uuidv4();
+          const newFh: FreehandElement = {
+            id: newId,
+            type: ShapeType.FREEHAND,
+            x: minX,
+            y: minY,
+            width: maxX - minX,
+            height: maxY - minY,
+            rotation: fh.rotation,
+            locked: false,
+            zIndex: Date.now() + Math.random(),
+            style: { ...fh.style },
+            points: segment,
+          };
+          addElement(newFh);
+        }
+        return; // Process one element per frame for performance
+      } else {
+        // Non-freehand: check bounding box
+        const box = {
+          minX: el.x - radius,
+          minY: el.y - radius,
+          maxX: el.x + el.width + radius,
+          maxY: el.y + el.height + radius,
+        };
+        if (isPointInBox(world, box)) {
+          deleteElements([el.id]);
+          return;
+        }
+      }
+    }
+  };
+
   const handlePointerDown = (e: React.PointerEvent) => {
     if (e.button === 2) return; // ignore right-click
 
@@ -196,17 +275,26 @@ export function Canvas() {
       return;
     }
 
-    // Eraser → delete element under cursor
+    // Eraser tool → start erasing mode (continuous erase while dragging)
     if (tool === 'eraser') {
-      const sortedEls = Object.values(elements).sort((a, b) => b.zIndex - a.zIndex);
-      for (const el of sortedEls) {
-        const box = { minX: el.x, minY: el.y, maxX: el.x + el.width, maxY: el.y + el.height };
-        if (isPointInBox(world, box)) {
-          saveSnapshot();
-          deleteElements([el.id]);
-          break;
+      saveSnapshot();
+      const eraserRadius = eraserSettings.size / 2;
+
+      if (eraserSettings.mode === 'object') {
+        // Object mode: delete the whole element under cursor
+        const freshEls = useCanvasStore.getState().elements;
+        const sortedEls = Object.values(freshEls).sort((a, b) => b.zIndex - a.zIndex);
+        for (const el of sortedEls) {
+          if (isPointNearElement(world, el, eraserRadius)) {
+            deleteElements([el.id]);
+            break;
+          }
         }
+      } else {
+        // Partial mode: erase parts of freehand strokes, delete other elements
+        performPartialErase(world, eraserRadius);
       }
+      setMode('erasing');
       return;
     }
 
@@ -430,6 +518,23 @@ export function Canvas() {
         break;
       }
 
+      case 'erasing': {
+        const eraserRadius = eraserSettings.size / 2;
+        if (eraserSettings.mode === 'object') {
+          const freshEls = useCanvasStore.getState().elements;
+          const sortedEls = Object.values(freshEls).sort((a, b) => b.zIndex - a.zIndex);
+          for (const el of sortedEls) {
+            if (isPointNearElement(world, el, eraserRadius)) {
+              deleteElements([el.id]);
+              break;
+            }
+          }
+        } else {
+          performPartialErase(world, eraserRadius);
+        }
+        break;
+      }
+
       default:
         break;
     }
@@ -477,6 +582,10 @@ export function Canvas() {
       rotateElementIdRef.current = null;
     }
 
+    if (prevMode === 'erasing') {
+      // erasing already performed inline; nothing extra needed
+    }
+
     setMode('idle');
   };
 
@@ -517,7 +626,8 @@ export function Canvas() {
       // Ctrl+scroll (trackpad pinch) sends small deltaY, plain mouse scroll
       // sends larger deltaY (typically ±100). Normalise both cases.
       const isTrackpadPinch = e.ctrlKey || e.metaKey;
-      const sensitivity = isTrackpadPinch ? 300 : 150;
+      // Trackpads send smaller deltaY continuously, mice send large jumps (e.g. 100-120 per notch)
+      const sensitivity = isTrackpadPinch ? 300 : 1000;
       const zoomFactor = Math.exp(-e.deltaY / sensitivity);
       const newZoom = Math.max(0.05, Math.min(vp.zoom * zoomFactor, 10));
       const scale = newZoom / vp.zoom;
@@ -664,7 +774,7 @@ export function Canvas() {
   // Cursor
   const getCursor = () => {
     if (tool === 'hand' || mode === 'panning') return 'grabbing';
-    if (tool === 'eraser') return 'crosshair';
+    if (tool === 'eraser') return 'none'; // we draw a custom cursor
     if (tool === 'text') return 'text';
     if (mode === 'dragging') return 'move';
     if (mode === 'resizing') return 'nwse-resize';
@@ -742,6 +852,76 @@ export function Canvas() {
           placeholder="Type here..."
         />
       )}
+
+      {/* Custom eraser cursor */}
+      {tool === 'eraser' && (
+        <EraserCursor size={eraserSettings.size} zoom={viewport.zoom} />
+      )}
     </div>
+  );
+}
+
+/* ─── Helper: Check if a point is near an element ─────────────────────────── */
+function isPointNearElement(world: Point, el: WhiteboardElement, radius: number): boolean {
+  if (el.type === ShapeType.FREEHAND) {
+    const fh = el as FreehandElement;
+    for (const [px, py] of fh.points) {
+      if (Math.hypot(world.x - px, world.y - py) < radius) return true;
+    }
+    return false;
+  }
+  // For shapes/text/images: expand bounding box by radius
+  const box = {
+    minX: el.x - radius,
+    minY: el.y - radius,
+    maxX: el.x + el.width + radius,
+    maxY: el.y + el.height + radius,
+  };
+  return isPointInBox(world, box);
+}
+
+/* ─── Eraser Cursor Component ─────────────────────────────────────────────── */
+function EraserCursor({ size, zoom }: { size: number; zoom: number }) {
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+
+    const handleMove = (e: MouseEvent) => {
+      const screenSize = size * zoom;
+      el.style.transform = `translate(${e.clientX - screenSize / 2}px, ${e.clientY - screenSize / 2}px)`;
+      el.style.opacity = '1';
+    };
+    const handleLeave = () => { el.style.opacity = '0'; };
+    const handleEnter = () => { el.style.opacity = '1'; };
+
+    // Use mousemove (fires without button press) instead of pointermove
+    document.addEventListener('mousemove', handleMove);
+    document.addEventListener('mouseleave', handleLeave);
+    document.addEventListener('mouseenter', handleEnter);
+    return () => {
+      document.removeEventListener('mousemove', handleMove);
+      document.removeEventListener('mouseleave', handleLeave);
+      document.removeEventListener('mouseenter', handleEnter);
+    };
+  }, [size, zoom]);
+
+  const screenSize = size * zoom;
+  return (
+    <div
+      ref={ref}
+      className="fixed top-0 left-0 pointer-events-none z-[9999]"
+      style={{
+        width: screenSize,
+        height: screenSize,
+        borderRadius: '50%',
+        border: '2px solid rgba(255,255,255,0.7)',
+        backgroundColor: 'rgba(255,255,255,0.08)',
+        opacity: 0,
+        willChange: 'transform',
+        transition: 'width 0.15s, height 0.15s',
+      }}
+    />
   );
 }
