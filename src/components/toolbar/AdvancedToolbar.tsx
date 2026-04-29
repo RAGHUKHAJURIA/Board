@@ -29,7 +29,7 @@ import {
 import { ShapeType } from '@/types';
 
 export function AdvancedToolbar() {
-  const { tool, setTool, undo, redo, canUndo, canRedo, selectedIds, elements, updateElement } = useCanvasStore();
+  const { tool, setTool, undo, redo, canUndo, canRedo, selectedIds, elements, updateElement, isInteracting } = useCanvasStore();
   const currentStyle = useUIStore(state => state.currentStyle);
   const penType = currentStyle.penType || 'pen';
   const updateCurrentStyle = useUIStore(state => state.updateCurrentStyle);
@@ -91,15 +91,15 @@ export function AdvancedToolbar() {
         <div key={t.id} className="relative group shrink-0">
           <button
             onClick={() => setTool(t.id as import('@/types').Tool)}
-            className={`p-2 flex justify-center rounded hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors ${
-              isActive ? 'bg-violet-100 text-violet-600 dark:bg-violet-900/30 dark:text-violet-400' : 'text-zinc-600 dark:text-zinc-400'
+            className={`p-2 flex justify-center rounded transition-colors ${
+              isActive ? 'bg-foreground text-background' : 'text-foreground hover:bg-zinc-100 dark:hover:bg-zinc-800'
             }`}
           >
             <Icon size={20} />
           </button>
 
           {/* Flyout Menu for Pen Types */}
-          <div className={`absolute ${isVertical ? 'left-full ml-2 top-0' : 'bottom-full mb-2 left-0'} bg-zinc-900 text-white rounded-lg shadow-xl opacity-0 group-hover:opacity-100 pointer-events-none group-hover:pointer-events-auto transition-opacity duration-200 delay-150 group-hover:delay-0 z-50 flex flex-col p-2 gap-1 border border-zinc-800 min-w-[140px] ${isVertical ? 'before:absolute before:content-[\'\'] before:-left-2 before:top-0 before:w-2 before:h-full' : ''}`}>
+          <div className={`absolute ${isVertical ? 'left-full ml-2 top-0' : 'bottom-full mb-2 left-0'} bg-white dark:bg-[#1a1a1e] text-foreground rounded-lg shadow-xl opacity-0 group-hover:opacity-100 pointer-events-none group-hover:pointer-events-auto transition-opacity duration-200 delay-150 group-hover:delay-0 z-50 flex flex-col p-2 gap-1 border border-zinc-200 dark:border-zinc-800 min-w-[140px] ${isVertical ? 'before:absolute before:content-[\'\'] before:-left-2 before:top-0 before:w-2 before:h-full' : ''}`}>
             <div className="text-[10px] font-semibold text-zinc-500 uppercase tracking-wider mb-1 px-2">Pen Type</div>
             {(['pen', 'pencil', 'fountain', 'marker', 'highlighter'] as const).map(pt => (
               <button
@@ -109,24 +109,24 @@ export function AdvancedToolbar() {
                    updateCurrentStyle({ penType: pt });
                    setTool(ShapeType.FREEHAND);
                 }}
-                className={`text-left text-xs px-2 py-1.5 rounded capitalize hover:bg-zinc-800 transition-colors ${
+                className={`text-left text-xs px-2 py-1.5 rounded capitalize transition-colors ${
                   penType === pt 
-                    ? 'text-violet-400 bg-violet-900/20 font-medium' 
-                    : 'text-zinc-300'
+                    ? 'bg-foreground text-background font-medium' 
+                    : 'text-foreground hover:bg-zinc-100 dark:hover:bg-zinc-800'
                 }`}
               >
                 {pt}
               </button>
             ))}
             
-            <div className="w-full h-px bg-zinc-800 my-1" />
+            <div className="w-full h-px bg-zinc-200 dark:bg-zinc-800 my-1" />
             
             <div className="text-[10px] font-semibold text-zinc-500 uppercase tracking-wider mb-1 px-2 mt-1">Color</div>
             <div className="flex flex-wrap gap-1 px-1 pb-1 justify-center max-w-[160px]">
               {PRESET_COLORS.map(c => (
                 <button
                   key={c}
-                  className={`w-4 h-4 rounded-sm border ${currentStyle.stroke === c ? 'border-white scale-110 relative z-10 shadow-[0_0_0_2px_rgba(139,92,246,0.8)]' : 'border-zinc-700 hover:scale-110'} transition-all`}
+                  className={`w-4 h-4 rounded-sm border ${currentStyle.stroke === c ? 'border-foreground scale-110 relative z-10 shadow-[0_0_0_2px_var(--foreground)]' : 'border-zinc-300 dark:border-zinc-700 hover:scale-110'} transition-all`}
                   style={{ backgroundColor: c }}
                   onClick={(e) => {
                     e.stopPropagation();
@@ -148,8 +148,8 @@ export function AdvancedToolbar() {
         <button
           key={t.id}
           onClick={() => setTool('eraser')}
-          className={`p-2 flex justify-center rounded hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors relative group shrink-0 ${
-            isActive ? 'bg-violet-100 text-violet-600 dark:bg-violet-900/30 dark:text-violet-400' : 'text-zinc-600 dark:text-zinc-400'
+          className={`p-2 flex justify-center rounded transition-colors relative group shrink-0 ${
+            isActive ? 'bg-foreground text-background' : 'text-foreground hover:bg-zinc-100 dark:hover:bg-zinc-800'
           }`}
           title={t.label}
         >
@@ -166,8 +166,8 @@ export function AdvancedToolbar() {
       <button
         key={t.id}
         onClick={() => setTool(t.id as import('@/types').Tool)}
-        className={`p-2 rounded hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors relative group shrink-0 ${
-          isActive ? 'bg-violet-100 text-violet-600 dark:bg-violet-900/30 dark:text-violet-400' : 'text-zinc-600 dark:text-zinc-400'
+        className={`p-2 rounded transition-colors relative group shrink-0 ${
+          isActive ? 'bg-foreground text-background' : 'text-foreground hover:bg-zinc-100 dark:hover:bg-zinc-800'
         }`}
         title={t.label}
       >
@@ -177,6 +177,76 @@ export function AdvancedToolbar() {
           {t.label}
         </div>
       </button>
+    );
+  };
+
+  /* ── Shared eraser panel renderer ────────────────────────── */
+  const renderEraserPanel = () => {
+    if (tool !== 'eraser' || isInteracting) return null;
+
+    return (
+      <div
+        className={`fixed ${isVertical ? 'left-[76px] top-1/2 -translate-y-1/2' : 'bottom-36 left-1/2 -translate-x-1/2'} bg-white/95 dark:bg-[#1a1a1e]/95 backdrop-blur-md text-foreground rounded-xl shadow-[0_10px_40px_rgba(0,0,0,0.15)] dark:shadow-[0_10px_40px_rgba(0,0,0,0.5)] flex flex-col p-3 gap-2 border border-zinc-200 dark:border-zinc-800 w-[180px] z-50 pointer-events-auto`}
+        onPointerDown={(e) => e.stopPropagation()}
+      >
+        <div className="text-[10px] font-semibold text-zinc-500 uppercase tracking-wider px-1">Eraser Mode</div>
+        <button
+          onClick={() => updateEraser({ mode: 'object' })}
+          className={`text-left text-xs px-3 py-2 rounded-lg transition-colors ${
+            eraserSettings.mode === 'object'
+              ? 'bg-foreground text-background font-medium'
+              : 'text-foreground hover:bg-zinc-100 dark:hover:bg-zinc-800 border border-transparent'
+          }`}
+        >
+          <div className="font-medium">🧹 Object</div>
+          <div className="text-[10px] text-zinc-500 mt-0.5">Remove whole element</div>
+        </button>
+        <button
+          onClick={() => updateEraser({ mode: 'partial' })}
+          className={`text-left text-xs px-3 py-2 rounded-lg transition-colors ${
+            eraserSettings.mode === 'partial'
+              ? 'bg-foreground text-background font-medium'
+              : 'text-foreground hover:bg-zinc-100 dark:hover:bg-zinc-800 border border-transparent'
+          }`}
+        >
+          <div className="font-medium">✂️ Partial</div>
+          <div className="text-[10px] text-zinc-500 mt-0.5">Erase where you drag</div>
+        </button>
+
+        <div className="w-full h-px bg-zinc-200 dark:bg-zinc-800 my-1" />
+
+        <div className="text-[10px] font-semibold text-zinc-500 uppercase tracking-wider px-1">Size</div>
+        <div className="flex flex-col gap-1.5 px-1">
+          <div className="flex justify-between text-[10px] text-zinc-400">
+            <span>Radius</span>
+            <span>{eraserSettings.size}px</span>
+          </div>
+          <input
+            type="range"
+            min="5"
+            max="80"
+            step="5"
+            value={eraserSettings.size}
+            onChange={(e) => updateEraser({ size: parseInt(e.target.value) })}
+            className="accent-foreground w-full"
+          />
+          <div className="flex gap-1">
+            {[10, 20, 40, 60].map(sz => (
+              <button
+                key={sz}
+                onClick={() => updateEraser({ size: sz })}
+                className={`flex-1 text-[10px] py-1 rounded border transition-colors ${
+                  eraserSettings.size === sz
+                    ? 'border-foreground bg-foreground text-background'
+                    : 'border-zinc-300 dark:border-zinc-700 text-foreground hover:border-zinc-500'
+                }`}
+              >
+                {sz}
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
     );
   };
 
@@ -247,83 +317,21 @@ export function AdvancedToolbar() {
         </div>
       </motion.div>
 
-      {/* Eraser Options Panel — shows when eraser tool is active */}
-      {tool === 'eraser' && (
-        <div
-          className="fixed left-[76px] top-1/2 -translate-y-1/2 bg-zinc-900/95 backdrop-blur-md text-white rounded-xl shadow-[0_10px_40px_rgba(0,0,0,0.5)] flex flex-col p-3 gap-2 border border-zinc-800 w-[180px] z-50 pointer-events-auto"
-          onPointerDown={(e) => e.stopPropagation()}
-        >
-          <div className="text-[10px] font-semibold text-zinc-500 uppercase tracking-wider px-1">Eraser Mode</div>
-          <button
-            onClick={() => updateEraser({ mode: 'object' })}
-            className={`text-left text-xs px-3 py-2 rounded-lg transition-colors ${
-              eraserSettings.mode === 'object'
-                ? 'text-violet-400 bg-violet-500/15 font-medium border border-violet-500/30'
-                : 'text-zinc-300 hover:bg-zinc-800 border border-transparent'
-            }`}
-          >
-            <div className="font-medium">🧹 Object</div>
-            <div className="text-[10px] text-zinc-500 mt-0.5">Remove whole element</div>
-          </button>
-          <button
-            onClick={() => updateEraser({ mode: 'partial' })}
-            className={`text-left text-xs px-3 py-2 rounded-lg transition-colors ${
-              eraserSettings.mode === 'partial'
-                ? 'text-violet-400 bg-violet-500/15 font-medium border border-violet-500/30'
-                : 'text-zinc-300 hover:bg-zinc-800 border border-transparent'
-            }`}
-          >
-            <div className="font-medium">✂️ Partial</div>
-            <div className="text-[10px] text-zinc-500 mt-0.5">Erase where you drag</div>
-          </button>
-
-          <div className="w-full h-px bg-zinc-800 my-1" />
-
-          <div className="text-[10px] font-semibold text-zinc-500 uppercase tracking-wider px-1">Size</div>
-          <div className="flex flex-col gap-1.5 px-1">
-            <div className="flex justify-between text-[10px] text-zinc-400">
-              <span>Radius</span>
-              <span>{eraserSettings.size}px</span>
-            </div>
-            <input
-              type="range"
-              min="5"
-              max="80"
-              step="5"
-              value={eraserSettings.size}
-              onChange={(e) => updateEraser({ size: parseInt(e.target.value) })}
-              className="accent-violet-500 w-full"
-            />
-            <div className="flex gap-1">
-              {[10, 20, 40, 60].map(sz => (
-                <button
-                  key={sz}
-                  onClick={() => updateEraser({ size: sz })}
-                  className={`flex-1 text-[10px] py-1 rounded border transition-colors ${
-                    eraserSettings.size === sz
-                      ? 'border-violet-500 text-violet-400 bg-violet-500/15'
-                      : 'border-zinc-700 text-zinc-500 hover:border-zinc-500'
-                  }`}
-                >
-                  {sz}
-                </button>
-              ))}
-            </div>
-          </div>
-        </div>
-      )}
+      {/* Eraser Options Panel */}
+      {renderEraserPanel()}
     </>
     );
   }
 
   /* ── Horizontal layout ────────────────────────────────────── */
   return (
+    <>
     <motion.div
       key="horizontal-toolbar"
       drag
       dragMomentum={false}
-      className="fixed bottom-6 left-0 right-0 mx-auto bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-lg shadow-lg px-3 py-2 flex flex-row items-center gap-1 z-50 pointer-events-auto outline-none max-w-max"
-      style={{ width: 'max-content', overflow: 'hidden' }}
+      className="fixed bottom-24 left-0 right-0 mx-auto bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-lg shadow-lg px-3 py-2 flex flex-row items-center gap-1 z-50 pointer-events-auto outline-none max-w-max"
+      style={{ width: 'max-content' }}
     >
       {/* Drag handle */}
       <div className="flex items-center pr-1 text-zinc-400 hover:text-zinc-200 cursor-grab active:cursor-grabbing shrink-0">
@@ -366,8 +374,8 @@ export function AdvancedToolbar() {
 
       <div className="h-6 w-px bg-zinc-200 dark:bg-zinc-800 mx-1 shrink-0" />
 
-      {/* Tools — horizontal row, no scrollbar */}
-      <div className="flex flex-row items-center gap-1 overflow-x-hidden overflow-y-hidden">
+      {/* Tools — horizontal row */}
+      <div className="flex flex-row items-center gap-1">
         {tools.map((t, i) => renderToolButton(t, i))}
       </div>
 
@@ -383,5 +391,7 @@ export function AdvancedToolbar() {
         />
       </div>
     </motion.div>
+    {renderEraserPanel()}
+    </>
   );
 }

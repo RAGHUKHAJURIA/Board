@@ -26,7 +26,7 @@ export function SelectionBox({ box, viewport, rotation = 0, onResizeStart, onRot
     top: `${screenY - padding}px`,
     width: `${screenW + padding * 2}px`,
     height: `${screenH + padding * 2}px`,
-    border: '2px solid #8b5cf6', // violet-500
+    border: '2px solid var(--foreground)',
     pointerEvents: 'none',
     transform: `rotate(${rotation}rad)`,
     transformOrigin: 'center center'
@@ -37,7 +37,7 @@ export function SelectionBox({ box, viewport, rotation = 0, onResizeStart, onRot
   const createHandle = (handle: ResizeHandle, top: string, left: string) => {
     return (
       <div
-        className="absolute bg-white border-2 border-violet-500 rounded-sm"
+        className="absolute bg-background border-2 border-foreground rounded-sm"
         style={{
           width: `${handleSize}px`,
           height: `${handleSize}px`,
@@ -58,7 +58,7 @@ export function SelectionBox({ box, viewport, rotation = 0, onResizeStart, onRot
       {!isMultiple && (
         <>
           <div
-            className="absolute bg-white border-2 border-violet-500 rounded-full"
+            className="absolute bg-background border-2 border-foreground rounded-full"
             style={{
               width: `${handleSize}px`,
               height: `${handleSize}px`,
@@ -72,7 +72,7 @@ export function SelectionBox({ box, viewport, rotation = 0, onResizeStart, onRot
           />
           {/* Connecting line to rotation handle */}
           <div 
-            className="absolute border-l-2 border-violet-500"
+            className="absolute border-l-2 border-foreground"
             style={{
               height: '30px',
               left: '50%',

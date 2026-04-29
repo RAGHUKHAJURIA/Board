@@ -15,7 +15,7 @@ interface UIState {
   };
   grid: GridSettings;
   snap: SnapSettings;
-  theme: "dark" | "light";
+  theme: "dark" | "light" | "system";
   currentStyle: StyleProperties;
   eraser: EraserSettings;
 
@@ -23,7 +23,7 @@ interface UIState {
   togglePanel: (panel: keyof UIState["panels"]) => void;
   updateGrid: (settings: Partial<GridSettings>) => void;
   updateSnap: (settings: Partial<SnapSettings>) => void;
-  setTheme: (theme: "dark" | "light") => void;
+  setTheme: (theme: "dark" | "light" | "system") => void;
   updateCurrentStyle: (style: Partial<StyleProperties>) => void;
   updateEraser: (settings: Partial<EraserSettings>) => void;
 }
@@ -39,7 +39,7 @@ export const useUIStore = create<UIState>()(
       enabled: true,
       size: 20,
       type: "dots",
-      color: "rgba(255, 255, 255, 0.1)",
+      color: "rgba(128, 128, 128, 0.2)",
       opacity: 1,
     },
     snap: {
@@ -81,6 +81,14 @@ export const useUIStore = create<UIState>()(
 
     setTheme: (theme) =>
       set((state) => {
+        const LIGHT_STROKES = ['#e2e8f0', '#f8fafc', '#ffffff', '#d1d5db', '#e5e7eb'];
+        const DARK_STROKES = ['#1e1e1e', '#000000', '#0f172a', '#1a1a2e'];
+        // Automatically switch default stroke color for better visibility
+        if (theme === "light" && LIGHT_STROKES.includes(state.currentStyle.stroke)) {
+          state.currentStyle.stroke = "#1e1e1e";
+        } else if (theme === "dark" && DARK_STROKES.includes(state.currentStyle.stroke)) {
+          state.currentStyle.stroke = "#e2e8f0";
+        }
         state.theme = theme;
       }),
 

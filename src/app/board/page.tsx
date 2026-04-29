@@ -6,6 +6,7 @@ import { AdvancedToolbar } from '@/components/toolbar/AdvancedToolbar';
 import { PropertiesPanel } from '@/components/panels/PropertiesPanel';
 import { LayersPanel } from '@/components/panels/LayersPanel';
 import { StatusBar } from '@/components/shared/StatusBar';
+import { MainMenu } from '@/components/shared/MainMenu';
 import { useKeyboardShortcuts } from '@/hooks/useKeyboardShortcuts';
 
 export default function BoardPage() {
@@ -13,7 +14,9 @@ export default function BoardPage() {
   useKeyboardShortcuts();
 
   return (
-    <main className="w-screen h-screen overflow-hidden bg-zinc-950 text-zinc-50 relative select-none">
+    <main className="w-screen h-screen overflow-hidden bg-background text-foreground relative select-none">
+      {/* Main Menu (Hamburger) */}
+      <MainMenu />
       {/* Toolbar - fixed, not inside canvas */}
       <AdvancedToolbar />
 

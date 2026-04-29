@@ -16,12 +16,14 @@ interface CanvasState {
   viewport: Viewport;
   tool: Tool;
   clipboard: WhiteboardElement[];
+  isInteracting: boolean;
 
   // History for proper undo/redo
   history: HistorySnapshot[];
   historyIndex: number;
 
   // Actions
+  setIsInteracting: (val: boolean) => void;
   setTool: (tool: Tool) => void;
   addElement: (element: WhiteboardElement) => void;
   updateElement: (id: string, updates: Partial<WhiteboardElement>) => void;
@@ -68,8 +70,13 @@ export const useCanvasStore = create<CanvasState>()(
     viewport: { x: 0, y: 0, zoom: 1, width: 0, height: 0 },
     tool: 'select',
     clipboard: [],
+    isInteracting: false,
     history: [{ elements: {} }],
     historyIndex: 0,
+
+    setIsInteracting: (val) => set((state) => {
+      state.isInteracting = val;
+    }),
 
     setTool: (tool) => set((state) => {
       state.tool = tool;

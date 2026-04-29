@@ -7,7 +7,7 @@ export function StyleBar() {
   const updateCurrentStyle = useUIStore(state => state.updateCurrentStyle);
 
   return (
-    <div className="absolute top-full mt-4 bg-zinc-900 border border-zinc-800 p-2 rounded-xl shadow-lg flex items-center gap-4">
+    <div className="absolute top-full mt-4 bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 p-2 rounded-xl shadow-lg flex items-center gap-4">
       <ColorPicker 
         color={currentStyle.stroke} 
         onChange={(c) => updateCurrentStyle({ stroke: c })} 
@@ -20,7 +20,7 @@ export function StyleBar() {
         allowTransparent
       />
       
-      <div className="w-[1px] h-8 bg-zinc-800" />
+      <div className="w-[1px] h-8 bg-zinc-200 dark:bg-zinc-800" />
       
       <div className="flex flex-col gap-1">
         <span className="text-[10px] text-zinc-500">Stroke Width</span>
@@ -28,7 +28,7 @@ export function StyleBar() {
           {[1, 2, 4].map(w => (
             <button
               key={w}
-              className={`w-6 h-6 rounded flex items-center justify-center ${currentStyle.strokeWidth === w ? 'bg-violet-600 text-white' : 'bg-zinc-800 text-zinc-400 hover:bg-zinc-700'}`}
+              className={`w-6 h-6 rounded flex items-center justify-center ${currentStyle.strokeWidth === w ? 'bg-foreground text-background' : 'bg-zinc-200 dark:bg-zinc-800 text-zinc-500 dark:text-zinc-400 hover:bg-zinc-700'}`}
               onClick={() => updateCurrentStyle({ strokeWidth: w })}
             >
               <div className="bg-current rounded-full" style={{ width: w + 2, height: w + 2 }} />
@@ -37,7 +37,7 @@ export function StyleBar() {
         </div>
       </div>
       
-      <div className="w-[1px] h-8 bg-zinc-800" />
+      <div className="w-[1px] h-8 bg-zinc-200 dark:bg-zinc-800" />
       
       <div className="flex flex-col gap-1">
         <span className="text-[10px] text-zinc-500">Style</span>
@@ -45,7 +45,7 @@ export function StyleBar() {
           {(['solid', 'dashed', 'dotted'] as const).map(s => (
             <button
               key={s}
-              className={`w-6 h-6 rounded flex items-center justify-center text-[10px] font-mono ${currentStyle.strokeStyle === s ? 'bg-violet-600 text-white' : 'bg-zinc-800 text-zinc-400 hover:bg-zinc-700'}`}
+              className={`w-6 h-6 rounded flex items-center justify-center text-[10px] font-mono ${currentStyle.strokeStyle === s ? 'bg-foreground text-background' : 'bg-zinc-200 dark:bg-zinc-800 text-zinc-500 dark:text-zinc-400 hover:bg-zinc-700'}`}
               onClick={() => updateCurrentStyle({ strokeStyle: s })}
             >
               {s === 'solid' ? '—' : s === 'dashed' ? '---' : '...'}
@@ -54,7 +54,7 @@ export function StyleBar() {
         </div>
       </div>
       
-      <div className="w-[1px] h-8 bg-zinc-800" />
+      <div className="w-[1px] h-8 bg-zinc-200 dark:bg-zinc-800" />
       
       <div className="flex flex-col gap-1">
         <span className="text-[10px] text-zinc-500">Roughness: {currentStyle.roughness}</span>
@@ -63,7 +63,7 @@ export function StyleBar() {
           min="0" max="3" step="0.5" 
           value={currentStyle.roughness}
           onChange={(e) => updateCurrentStyle({ roughness: parseFloat(e.target.value) })}
-          className="w-20 accent-violet-500"
+          className="w-20 accent-foreground"
         />
       </div>
     </div>

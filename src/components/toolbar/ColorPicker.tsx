@@ -100,8 +100,8 @@ export function ColorPicker({ color, onChange, label, allowTransparent, position
 
   const isLg = size === 'lg';
   const btnClass = isLg
-    ? 'w-8 h-8 rounded-xl shadow-md border-2 border-zinc-300 dark:border-zinc-700 overflow-hidden relative cursor-pointer hover:scale-105 active:scale-95 transition-all'
-    : 'w-6 h-6 rounded-md shadow-sm border border-zinc-700 overflow-hidden relative cursor-pointer';
+    ? 'w-8 h-8 rounded-xl shadow-md border-2 border-zinc-300 dark:border-zinc-300 dark:border-zinc-700 overflow-hidden relative cursor-pointer hover:scale-105 active:scale-95 transition-all'
+    : 'w-6 h-6 rounded-md shadow-sm border border-zinc-300 dark:border-zinc-700 overflow-hidden relative cursor-pointer';
 
   // Determine swatch sizes based on context:
   // When opened from the sidebar (lg button), use smaller swatches to
@@ -116,7 +116,7 @@ export function ColorPicker({ color, onChange, label, allowTransparent, position
       ref={popoverRef}
       onPointerDownCapture={(e) => e.stopPropagation()}
       onPointerMoveCapture={(e) => e.stopPropagation()}
-      className={`fixed z-[9999] p-3 bg-[#1a1a1e] border border-zinc-700/60 rounded-2xl shadow-[0_20px_60px_rgba(0,0,0,0.6)] flex flex-col gap-3 ${panelWidth}`}
+      className={`fixed z-[9999] p-3 bg-white dark:bg-[#1a1a1e] border border-zinc-200 dark:border-zinc-700/60 rounded-2xl shadow-[0_20px_60px_rgba(0,0,0,0.15)] dark:shadow-[0_20px_60px_rgba(0,0,0,0.6)] flex flex-col gap-3 ${panelWidth}`}
       style={{
         top: position === 'top' ? undefined : popoverPos.top,
         bottom: position === 'top' ? `${window.innerHeight - popoverPos.top}px` : undefined,
@@ -125,7 +125,7 @@ export function ColorPicker({ color, onChange, label, allowTransparent, position
     >
       {allowTransparent && (
         <button
-          className={`py-1.5 text-xs w-full rounded-lg border ${transparentSelected ? 'border-violet-500 text-violet-400 bg-violet-500/10' : 'border-zinc-700 text-zinc-400 hover:bg-zinc-800 transition-colors'}`}
+          className={`py-1.5 text-xs w-full rounded-lg border ${transparentSelected ? 'border-foreground text-background bg-foreground' : 'border-zinc-300 dark:border-zinc-700 text-zinc-500 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-200 dark:bg-zinc-800 transition-colors'}`}
           onClick={() => { onChange('transparent'); setIsOpen(false); }}
         >
           Transparent
@@ -144,8 +144,8 @@ export function ColorPicker({ color, onChange, label, allowTransparent, position
             key={c}
             className={`${swatchSize} rounded-[8px] border ${
               color === c
-                ? 'border-white/60 ring-2 ring-white/30 scale-105'
-                : 'border-black/10 dark:border-white/[0.06] hover:scale-110 hover:border-white/20'
+                ? 'border-foreground ring-2 ring-foreground/30 scale-105'
+                : 'border-zinc-300 dark:border-white/[0.06] hover:scale-110 hover:border-foreground/40'
             } active:scale-95 transition-all shadow-sm`}
             style={{ backgroundColor: c }}
             onClick={() => onChange(c)}

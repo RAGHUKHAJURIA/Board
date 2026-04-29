@@ -22,7 +22,7 @@ export function LayersPanel() {
     return (
       <button 
         onClick={() => togglePanel('layers')}
-        className="fixed right-0 top-32 bg-zinc-900/90 backdrop-blur-md border border-zinc-800 border-r-0 rounded-l-lg p-2 py-3 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 shadow-xl z-40 pointer-events-auto flex items-center gap-1 transition-all"
+        className="fixed right-0 top-32 bg-white/90 dark:bg-[#1a1a1e]/90 backdrop-blur-md border border-zinc-200 dark:border-zinc-800 border-r-0 rounded-l-lg p-2 py-3 text-zinc-500 dark:text-zinc-400 hover:text-foreground hover:bg-zinc-100 dark:hover:bg-zinc-200 dark:bg-zinc-800 shadow-xl z-40 pointer-events-auto flex items-center gap-1 transition-all"
         title="Restore Layers Panel"
       >
         <ChevronLeft size={16} />
@@ -71,14 +71,14 @@ export function LayersPanel() {
       animate={{ opacity: 1, scale: 1 }}
       exit={{ opacity: 0, scale: 0.95 }}
       transition={{ duration: 0.15 }}
-      className="fixed left-20 top-20 w-64 bg-zinc-900/90 backdrop-blur-md border border-zinc-800 rounded-xl shadow-xl flex flex-col z-30 pointer-events-auto"
+      className="fixed left-20 top-20 w-64 bg-white/90 dark:bg-[#1a1a1e]/90 backdrop-blur-md border border-zinc-200 dark:border-zinc-800 rounded-xl shadow-xl flex flex-col z-30 pointer-events-auto"
     >
-      <div className="flex items-center justify-between p-3 border-b border-zinc-800 cursor-grab active:cursor-grabbing">
-        <h3 className="text-sm font-semibold text-zinc-200 flex items-center gap-2">
+      <div className="flex items-center justify-between p-3 border-b border-zinc-200 dark:border-zinc-800 cursor-grab active:cursor-grabbing">
+        <h3 className="text-sm font-semibold text-foreground flex items-center gap-2">
           <GripHorizontal size={14} className="text-zinc-500" />
           <Layers size={16} /> Layers
         </h3>
-        <button onClick={() => togglePanel('layers')} className="text-zinc-500 hover:text-zinc-300">
+        <button onClick={() => togglePanel('layers')} className="text-zinc-500 hover:text-zinc-700 dark:text-zinc-300">
           <X size={16} />
         </button>
       </div>
@@ -103,10 +103,10 @@ export function LayersPanel() {
                 }
               }}
               className={`flex items-center gap-2 p-2 rounded cursor-pointer text-sm
-                ${isSelected ? 'bg-violet-600/20 text-violet-300' : 'text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200'}
+                ${isSelected ? 'bg-foreground text-background font-medium' : 'text-zinc-500 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-200 dark:bg-zinc-800 hover:text-foreground'}
               `}
             >
-              <div className={isSelected ? 'text-violet-400' : 'text-zinc-500'}>
+              <div className={isSelected ? 'text-background' : 'text-zinc-500'}>
                 {getIcon(element.type)}
               </div>
               <span className="truncate flex-1">{getLabel(element.type)}</span>
@@ -115,16 +115,16 @@ export function LayersPanel() {
         })}
       </div>
       
-      <div className="p-3 border-t border-zinc-800 flex gap-2">
+      <div className="p-3 border-t border-zinc-200 dark:border-zinc-800 flex gap-2">
         <button 
           onClick={() => exportToPNG({ elements: Object.values(elements), grid })}
-          className="flex-1 flex items-center justify-center gap-2 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-xs py-2 rounded"
+          className="flex-1 flex items-center justify-center gap-2 bg-zinc-200 dark:bg-zinc-800 hover:bg-zinc-700 text-zinc-700 dark:text-zinc-300 text-xs py-2 rounded"
         >
           <Download size={14} /> PNG
         </button>
         <button 
           onClick={() => exportToJSON(elements)}
-          className="flex-1 flex items-center justify-center gap-2 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-xs py-2 rounded"
+          className="flex-1 flex items-center justify-center gap-2 bg-zinc-200 dark:bg-zinc-800 hover:bg-zinc-700 text-zinc-700 dark:text-zinc-300 text-xs py-2 rounded"
         >
           <FileJson size={14} /> JSON
         </button>

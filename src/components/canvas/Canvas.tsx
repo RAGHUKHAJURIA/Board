@@ -31,7 +31,7 @@ export function Canvas() {
   const selectedIds = useCanvasStore(state => state.selectedIds);
   const viewport = useCanvasStore(state => state.viewport);
   const tool = useCanvasStore(state => state.tool);
-  const { addElement, updateElement, deleteElements, selectElements, clearSelection, updateViewport, saveSnapshot, setTool } = useCanvasStore();
+  const { addElement, updateElement, deleteElements, selectElements, clearSelection, updateViewport, saveSnapshot, setTool, setIsInteracting } = useCanvasStore();
 
   const currentStyle = useUIStore(state => state.currentStyle);
   const grid = useUIStore(state => state.grid);
@@ -104,8 +104,8 @@ export function Canvas() {
           ctx.save();
           ctx.translate(viewport.x, viewport.y);
           ctx.scale(viewport.zoom, viewport.zoom);
-          ctx.fillStyle = 'rgba(139, 92, 246, 0.08)';
-          ctx.strokeStyle = 'rgba(139, 92, 246, 0.8)';
+          ctx.fillStyle = 'rgba(0, 0, 0, 0.06)';
+          ctx.strokeStyle = 'rgba(0, 0, 0, 0.5)';
           ctx.lineWidth = 1 / viewport.zoom;
 
           const x = Math.min(selectionBox.start.x, selectionBox.end.x);
@@ -224,6 +224,7 @@ export function Canvas() {
     }
 
     (e.target as Element).setPointerCapture(e.pointerId);
+    setIsInteracting(true);
     const screen: Point = { x: e.clientX, y: e.clientY };
     const world = screenToWorld(e.clientX, e.clientY);
     lastPointerPos.current = screen;
@@ -587,6 +588,7 @@ export function Canvas() {
     }
 
     setMode('idle');
+    setIsInteracting(false);
   };
 
   // ── Wheel / Zoom handling ────────────────────────────────────────────────
@@ -680,7 +682,7 @@ export function Canvas() {
       fontFamily: el.fontFamily || 'Inter, sans-serif',
       color: el.color || el.style.stroke,
       background: 'transparent',
-      border: '2px solid #8b5cf6',
+      border: '2px solid var(--foreground)',
       outline: 'none',
       resize: 'none',
       padding: '4px',
@@ -785,7 +787,7 @@ export function Canvas() {
   return (
     <div
       ref={containerRef}
-      className="absolute inset-0 bg-zinc-950 touch-none"
+      className="absolute inset-0 bg-background touch-none"
       style={{ cursor: getCursor(), overflow: 'hidden' }}
       onPointerMove={handlePointerMove}
       onPointerUp={handlePointerUp}
@@ -916,8 +918,9 @@ function EraserCursor({ size, zoom }: { size: number; zoom: number }) {
         width: screenSize,
         height: screenSize,
         borderRadius: '50%',
-        border: '2px solid rgba(255,255,255,0.7)',
-        backgroundColor: 'rgba(255,255,255,0.08)',
+        border: '2px solid rgba(0,0,0,0.5)',
+        boxShadow: '0 0 0 1px rgba(255,255,255,0.5)',
+        backgroundColor: 'rgba(128,128,128,0.1)',
         opacity: 0,
         willChange: 'transform',
         transition: 'width 0.15s, height 0.15s',

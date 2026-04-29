@@ -18,18 +18,18 @@ export function ToolButton({ icon: Icon, label, shortcut, isActive, onClick }: T
           onClick={onClick}
           className={`p-2.5 rounded-xl transition-all duration-200 flex items-center justify-center
             ${isActive 
-              ? 'bg-violet-600 text-white shadow-md scale-110' 
-              : 'text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800'
+              ? 'bg-foreground text-background shadow-md scale-110' 
+              : 'text-zinc-500 dark:text-zinc-400 hover:text-zinc-100 hover:bg-zinc-100 dark:hover:bg-zinc-200 dark:bg-zinc-800'
             }
           `}
         >
           <Icon size={20} strokeWidth={isActive ? 2.5 : 2} />
         </TooltipTrigger>
-        <TooltipContent side="bottom" sideOffset={10} className="bg-zinc-900 border-zinc-800 text-xs">
+        <TooltipContent side="bottom" sideOffset={10} className="bg-white dark:bg-zinc-900 border-zinc-200 dark:border-zinc-800 text-xs">
           <div className="flex items-center space-x-2">
             <span>{label}</span>
             {shortcut && (
-              <span className="font-mono text-zinc-500 bg-zinc-800 px-1 rounded">{shortcut}</span>
+              <span className="font-mono text-zinc-500 bg-zinc-200 dark:bg-zinc-800 px-1 rounded">{shortcut}</span>
             )}
           </div>
         </TooltipContent>
