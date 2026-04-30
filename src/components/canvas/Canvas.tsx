@@ -31,7 +31,7 @@ export function Canvas() {
   const selectedIds = useCanvasStore(state => state.selectedIds);
   const viewport = useCanvasStore(state => state.viewport);
   const tool = useCanvasStore(state => state.tool);
-  const { addElement, updateElement, deleteElements, selectElements, clearSelection, updateViewport, saveSnapshot, setTool, setIsInteracting } = useCanvasStore();
+  const { addElement, updateElement, deleteElements, selectElements, clearSelection, updateViewport, saveSnapshot, setTool, setIsInteracting, batchErase } = useCanvasStore();
 
   const currentStyle = useUIStore(state => state.currentStyle);
   const grid = useUIStore(state => state.grid);
@@ -138,81 +138,104 @@ export function Canvas() {
       .map(id => elements[id])
       .filter(Boolean) as WhiteboardElement[];
 
-  // Partial eraser: splits freehand strokes where eraser touches, deletes other elements
+  // Batch erase: partial mode splits freehand strokes, deletes other elements touching the eraser circle.
+  // We use getState() for reads and mutate everything in one deleteElements/addElement pass to avoid
+  // polluting the undo history with dozens of intermediate snapshots.
   const performPartialErase = (world: Point, radius: number) => {
     const freshEls = useCanvasStore.getState().elements;
-    const sortedEls = Object.values(freshEls).sort((a, b) => b.zIndex - a.zIndex);
+    const toDelete: string[] = [];
+    const toAdd: WhiteboardElement[] = [];
 
-    for (const el of sortedEls) {
+    for (const el of Object.values(freshEls)) {
       if (el.type === ShapeType.FREEHAND) {
         const fh = el as FreehandElement;
-        // Check if any point is within eraser radius
-        const hitIdx = fh.points.findIndex(([px, py]) => Math.hypot(world.x - px, world.y - py) < radius);
-        if (hitIdx === -1) continue;
+        // Check if any SEGMENT of the stroke passes within eraser radius
+        // (point-only check misses sparse strokes drawn quickly)
+        let hit = false;
+        for (let i = 0; i < fh.points.length; i++) {
+          const [ax, ay] = fh.points[i]!;
+          if (i < fh.points.length - 1) {
+            const [bx, by] = fh.points[i + 1]!;
+            const dx = bx - ax, dy = by - ay;
+            const lenSq = dx * dx + dy * dy;
+            let dist: number;
+            if (lenSq === 0) {
+              dist = Math.hypot(world.x - ax, world.y - ay);
+            } else {
+              const t = Math.max(0, Math.min(1, ((world.x - ax) * dx + (world.y - ay) * dy) / lenSq));
+              dist = Math.hypot(world.x - (ax + t * dx), world.y - (ay + t * dy));
+            }
+            if (dist < radius) { hit = true; break; }
+          } else {
+            if (Math.hypot(world.x - ax, world.y - ay) < radius) { hit = true; break; }
+          }
+        }
+        if (!hit) continue;
 
-        // Split the stroke: remove points within the eraser radius and create new strokes from remaining segments
+        // Split into surviving segments — erase points that are within radius of eraser
         const remaining: [number, number, number?][][] = [];
         let currentSegment: [number, number, number?][] = [];
-
-        for (const pt of fh.points) {
+        for (let si = 0; si < fh.points.length; si++) {
+          const pt = fh.points[si]!;
           const [px, py] = pt;
-          if (Math.hypot(world.x - px, world.y - py) < radius) {
-            // This point is erased — break the segment
-            if (currentSegment.length >= 2) {
-              remaining.push([...currentSegment]);
+          // Check point proximity
+          let erased = Math.hypot(world.x - px, world.y - py) < radius;
+          // Also erase if the segment FROM the previous point passes through the eraser
+          if (!erased && si > 0) {
+            const [ppx, ppy] = fh.points[si - 1]!;
+            const dx2 = px - ppx, dy2 = py - ppy;
+            const lenSq2 = dx2 * dx2 + dy2 * dy2;
+            if (lenSq2 > 0) {
+              const t2 = Math.max(0, Math.min(1, ((world.x - ppx) * dx2 + (world.y - ppy) * dy2) / lenSq2));
+              const segDist = Math.hypot(world.x - (ppx + t2 * dx2), world.y - (ppy + t2 * dy2));
+              if (segDist < radius) erased = true;
             }
+          }
+          if (erased) {
+            if (currentSegment.length >= 2) remaining.push([...currentSegment]);
             currentSegment = [];
           } else {
             currentSegment.push(pt);
           }
         }
-        if (currentSegment.length >= 2) {
-          remaining.push(currentSegment);
-        }
+        if (currentSegment.length >= 2) remaining.push(currentSegment);
 
-        // Delete the original stroke
-        deleteElements([el.id]);
+        toDelete.push(el.id);
 
-        // Create new stroke elements from remaining segments
         for (const segment of remaining) {
           const xs = segment.map(([x]) => x);
           const ys = segment.map(([, y]) => y);
-          const minX = Math.min(...xs);
-          const minY = Math.min(...ys);
-          const maxX = Math.max(...xs);
-          const maxY = Math.max(...ys);
-
-          const newId = uuidv4();
           const newFh: FreehandElement = {
-            id: newId,
+            id: uuidv4(),
             type: ShapeType.FREEHAND,
-            x: minX,
-            y: minY,
-            width: maxX - minX,
-            height: maxY - minY,
+            x: Math.min(...xs),
+            y: Math.min(...ys),
+            width: Math.max(...xs) - Math.min(...xs),
+            height: Math.max(...ys) - Math.min(...ys),
             rotation: fh.rotation,
             locked: false,
             zIndex: Date.now() + Math.random(),
             style: { ...fh.style },
             points: segment,
           };
-          addElement(newFh);
+          toAdd.push(newFh);
         }
-        return; // Process one element per frame for performance
       } else {
-        // Non-freehand: check bounding box
+        // Non-freehand: bounding-box hit test
         const box = {
           minX: el.x - radius,
           minY: el.y - radius,
           maxX: el.x + el.width + radius,
           maxY: el.y + el.height + radius,
         };
-        if (isPointInBox(world, box)) {
-          deleteElements([el.id]);
-          return;
-        }
+        if (isPointInBox(world, box)) toDelete.push(el.id);
       }
     }
+
+    if (toDelete.length === 0 && toAdd.length === 0) return;
+
+    // Apply all changes without touching undo history (snapshot taken once at pointerdown)
+    batchErase(toDelete, toAdd.length > 0 ? toAdd : undefined);
   };
 
   const handlePointerDown = (e: React.PointerEvent) => {
@@ -276,23 +299,22 @@ export function Canvas() {
       return;
     }
 
-    // Eraser tool → start erasing mode (continuous erase while dragging)
+    // Eraser tool
     if (tool === 'eraser') {
+      // Save ONE snapshot before the whole erase gesture (not per-element)
       saveSnapshot();
       const eraserRadius = eraserSettings.size / 2;
 
       if (eraserSettings.mode === 'object') {
-        // Object mode: delete the whole element under cursor
+        // Object mode: delete ALL elements under cursor in one pass
         const freshEls = useCanvasStore.getState().elements;
-        const sortedEls = Object.values(freshEls).sort((a, b) => b.zIndex - a.zIndex);
-        for (const el of sortedEls) {
-          if (isPointNearElement(world, el, eraserRadius)) {
-            deleteElements([el.id]);
-            break;
-          }
+        const toDelete = Object.values(freshEls)
+          .filter(el => isPointNearElement(world, el, eraserRadius))
+          .map(el => el.id);
+        if (toDelete.length > 0) {
+          batchErase(toDelete);
         }
       } else {
-        // Partial mode: erase parts of freehand strokes, delete other elements
         performPartialErase(world, eraserRadius);
       }
       setMode('erasing');
@@ -522,13 +544,13 @@ export function Canvas() {
       case 'erasing': {
         const eraserRadius = eraserSettings.size / 2;
         if (eraserSettings.mode === 'object') {
+          // Delete all elements under the moving eraser in one pass
           const freshEls = useCanvasStore.getState().elements;
-          const sortedEls = Object.values(freshEls).sort((a, b) => b.zIndex - a.zIndex);
-          for (const el of sortedEls) {
-            if (isPointNearElement(world, el, eraserRadius)) {
-              deleteElements([el.id]);
-              break;
-            }
+          const toDelete = Object.values(freshEls)
+            .filter(el => isPointNearElement(world, el, eraserRadius))
+            .map(el => el.id);
+          if (toDelete.length > 0) {
+            batchErase(toDelete);
           }
         } else {
           performPartialErase(world, eraserRadius);
@@ -864,11 +886,31 @@ export function Canvas() {
 }
 
 /* ─── Helper: Check if a point is near an element ─────────────────────────── */
+/** Returns the minimum distance from point P to segment AB */
+function pointToSegmentDist(px: number, py: number, ax: number, ay: number, bx: number, by: number): number {
+  const dx = bx - ax;
+  const dy = by - ay;
+  const lenSq = dx * dx + dy * dy;
+  if (lenSq === 0) return Math.hypot(px - ax, py - ay);
+  const t = Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / lenSq));
+  return Math.hypot(px - (ax + t * dx), py - (ay + t * dy));
+}
+
 function isPointNearElement(world: Point, el: WhiteboardElement, radius: number): boolean {
   if (el.type === ShapeType.FREEHAND) {
     const fh = el as FreehandElement;
-    for (const [px, py] of fh.points) {
-      if (Math.hypot(world.x - px, world.y - py) < radius) return true;
+    if (fh.points.length === 0) return false;
+    // Check each LINE SEGMENT between consecutive points, not just the points themselves.
+    // This catches sparse strokes where the eraser passes between recorded points.
+    for (let i = 0; i < fh.points.length; i++) {
+      const [ax, ay] = fh.points[i]!;
+      if (i === fh.points.length - 1) {
+        // Last point: check point-to-point distance
+        if (Math.hypot(world.x - ax, world.y - ay) < radius) return true;
+      } else {
+        const [bx, by] = fh.points[i + 1]!;
+        if (pointToSegmentDist(world.x, world.y, ax, ay, bx, by) < radius) return true;
+      }
     }
     return false;
   }

@@ -57,6 +57,9 @@ interface CanvasState {
   // Zoom helpers
   zoomToFit: () => void;
   setZoom: (zoom: number) => void;
+
+  // Batch erase (no history — caller manages snapshot)
+  batchErase: (deleteIds: string[], addElements?: WhiteboardElement[]) => void;
 }
 
 const cloneElements = (elements: Record<string, WhiteboardElement>): Record<string, WhiteboardElement> => {
@@ -121,6 +124,20 @@ export const useCanvasStore = create<CanvasState>()(
         delete state.elements[id];
         state.selectedIds.delete(id);
       });
+    }),
+
+    // Delete + add elements without touching undo history.
+    // Used by the eraser during a drag gesture (snapshot is saved once at pointerdown).
+    batchErase: (deleteIds, addElements) => set((state) => {
+      deleteIds.forEach(id => {
+        delete state.elements[id];
+        state.selectedIds.delete(id);
+      });
+      if (addElements) {
+        addElements.forEach(el => {
+          state.elements[el.id] = el;
+        });
+      }
     }),
 
     selectElements: (ids) => set((state) => {

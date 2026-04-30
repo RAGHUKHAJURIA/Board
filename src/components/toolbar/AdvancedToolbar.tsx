@@ -1,7 +1,9 @@
 'use client';
 
-import { useState } from 'react';
-import { motion } from 'framer-motion';
+import { useState, useEffect } from 'react';
+import { useDragControls } from 'framer-motion';
+import { createPortal } from 'react-dom';
+import { motion, AnimatePresence } from 'framer-motion';
 import { useCanvasStore } from '@/store/canvas-store';
 import { useUIStore } from '@/store/ui-store';
 import { ColorPicker, PRESET_COLORS } from './ColorPicker';
@@ -25,30 +27,216 @@ import {
   GripHorizontal,
   LayoutList,
   LayoutDashboard,
+  X,
 } from 'lucide-react';
 import { ShapeType } from '@/types';
 
+/* ─────────────────────────────────────────────────────────
+   Pen Settings Panel (rendered in a fixed top-right portal)
+───────────────────────────────────────────────────────── */
+function PenPanel({
+  penType,
+  stroke,
+  onPenType,
+  onColor,
+  onClose,
+}: {
+  penType: string;
+  stroke: string;
+  onPenType: (p: string) => void;
+  onColor: (c: string) => void;
+  onClose: () => void;
+}) {
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: -8, scale: 0.96 }}
+      animate={{ opacity: 1, y: 0, scale: 1 }}
+      exit={{ opacity: 0, y: -8, scale: 0.96 }}
+      transition={{ duration: 0.15 }}
+      className="fixed top-4 right-4 z-[200] bg-white dark:bg-[#1a1a1e] border border-zinc-200 dark:border-zinc-700 rounded-2xl shadow-2xl p-4 w-[200px]"
+      onPointerDown={(e) => e.stopPropagation()}
+    >
+      {/* Header */}
+      <div className="flex items-center justify-between mb-3">
+        <span className="text-[11px] font-semibold text-zinc-500 uppercase tracking-wider">Pen Type</span>
+        <button onClick={onClose} className="text-zinc-400 hover:text-foreground transition-colors p-0.5 rounded">
+          <X size={13} />
+        </button>
+      </div>
+
+      {/* Pen type list */}
+      <div className="flex flex-col gap-0.5 mb-3">
+        {(['pen', 'pencil', 'fountain', 'marker', 'highlighter'] as const).map((pt) => (
+          <button
+            key={pt}
+            onClick={(e) => { e.stopPropagation(); onPenType(pt); }}
+            className={`text-left text-xs px-2 py-1.5 rounded-md capitalize transition-colors ${
+              penType === pt
+                ? 'bg-foreground text-background font-medium'
+                : 'text-foreground hover:bg-zinc-100 dark:hover:bg-zinc-800'
+            }`}
+          >
+            {pt.charAt(0).toUpperCase() + pt.slice(1)}
+          </button>
+        ))}
+      </div>
+
+      <div className="w-full h-px bg-zinc-200 dark:bg-zinc-700 mb-3" />
+
+      {/* Color section */}
+      <div className="text-[11px] font-semibold text-zinc-500 uppercase tracking-wider mb-2">Color</div>
+      <div className="grid grid-cols-6 gap-1.5 justify-items-center">
+        {PRESET_COLORS.map((c) => (
+          <button
+            key={c}
+            onClick={(e) => { e.stopPropagation(); onColor(c); }}
+            className={`w-5 h-5 rounded-md border transition-all ${
+              stroke === c
+                ? 'border-foreground scale-125 shadow-[0_0_0_2px_var(--foreground)] relative z-10'
+                : 'border-zinc-300 dark:border-zinc-700 hover:scale-110'
+            }`}
+            style={{ backgroundColor: c }}
+            title={c}
+          />
+        ))}
+      </div>
+    </motion.div>
+  );
+}
+
+/* ─────────────────────────────────────────────────────────
+   Eraser Settings Panel (rendered in a fixed top-right portal)
+───────────────────────────────────────────────────────── */
+function EraserPanel({
+  mode,
+  size,
+  onMode,
+  onSize,
+  onClose,
+}: {
+  mode: string;
+  size: number;
+  onMode: (m: 'object' | 'partial') => void;
+  onSize: (s: number) => void;
+  onClose: () => void;
+}) {
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: -8, scale: 0.96 }}
+      animate={{ opacity: 1, y: 0, scale: 1 }}
+      exit={{ opacity: 0, y: -8, scale: 0.96 }}
+      transition={{ duration: 0.15 }}
+      className="fixed top-4 right-4 z-[200] bg-white dark:bg-[#1a1a1e] border border-zinc-200 dark:border-zinc-700 rounded-2xl shadow-2xl p-4 w-[200px]"
+      onPointerDown={(e) => e.stopPropagation()}
+    >
+      {/* Header */}
+      <div className="flex items-center justify-between mb-3">
+        <span className="text-[11px] font-semibold text-zinc-500 uppercase tracking-wider">Eraser Mode</span>
+        <button onClick={onClose} className="text-zinc-400 hover:text-foreground transition-colors p-0.5 rounded">
+          <X size={13} />
+        </button>
+      </div>
+
+      {/* Mode buttons */}
+      <div className="flex flex-col gap-1.5 mb-3">
+        <button
+          onClick={(e) => { e.stopPropagation(); onMode('object'); }}
+          className={`text-left px-3 py-2 rounded-lg text-xs transition-colors ${
+            mode === 'object'
+              ? 'bg-foreground text-background font-medium'
+              : 'text-foreground hover:bg-zinc-100 dark:hover:bg-zinc-800 border border-transparent'
+          }`}
+        >
+          <div className="font-medium">🧹 Object</div>
+          <div className="text-[10px] text-zinc-500 mt-0.5">Remove whole element</div>
+        </button>
+        <button
+          onClick={(e) => { e.stopPropagation(); onMode('partial'); }}
+          className={`text-left px-3 py-2 rounded-lg text-xs transition-colors ${
+            mode === 'partial'
+              ? 'bg-foreground text-background font-medium'
+              : 'text-foreground hover:bg-zinc-100 dark:hover:bg-zinc-800 border border-transparent'
+          }`}
+        >
+          <div className="font-medium">✂️ Partial</div>
+          <div className="text-[10px] text-zinc-500 mt-0.5">Erase where you drag</div>
+        </button>
+      </div>
+
+      <div className="w-full h-px bg-zinc-200 dark:bg-zinc-700 mb-3" />
+
+      {/* Size */}
+      <div className="text-[11px] font-semibold text-zinc-500 uppercase tracking-wider mb-2">Size</div>
+      <div className="flex flex-col gap-2">
+        <div className="flex justify-between text-[10px] text-zinc-400">
+          <span>Radius</span>
+          <span>{size}px</span>
+        </div>
+        <input
+          type="range"
+          min="5"
+          max="80"
+          step="5"
+          value={size}
+          onChange={(e) => { e.stopPropagation(); onSize(parseInt(e.target.value)); }}
+          onPointerDown={(e) => e.stopPropagation()}
+          className="accent-foreground w-full"
+        />
+        <div className="flex gap-1">
+          {[10, 20, 40, 60].map((sz) => (
+            <button
+              key={sz}
+              onClick={(e) => { e.stopPropagation(); onSize(sz); }}
+              className={`flex-1 text-[10px] py-1 rounded border transition-colors ${
+                size === sz
+                  ? 'border-foreground bg-foreground text-background'
+                  : 'border-zinc-300 dark:border-zinc-700 text-foreground hover:border-zinc-500'
+              }`}
+            >
+              {sz}
+            </button>
+          ))}
+        </div>
+      </div>
+    </motion.div>
+  );
+}
+
+/* ═══════════════════════════════════════════════════════
+   Main Toolbar
+═══════════════════════════════════════════════════════ */
 export function AdvancedToolbar() {
   const { tool, setTool, undo, redo, canUndo, canRedo, selectedIds, elements, updateElement, isInteracting } = useCanvasStore();
-  const currentStyle = useUIStore(state => state.currentStyle);
+  const currentStyle = useUIStore((state) => state.currentStyle);
   const penType = currentStyle.penType || 'pen';
-  const updateCurrentStyle = useUIStore(state => state.updateCurrentStyle);
-  const eraserSettings = useUIStore(state => state.eraser);
-  const updateEraser = useUIStore(state => state.updateEraser);
+  const updateCurrentStyle = useUIStore((state) => state.updateCurrentStyle);
+  const eraserSettings = useUIStore((state) => state.eraser);
+  const updateEraser = useUIStore((state) => state.updateEraser);
 
-  // Orientation: 'vertical' (default tall sidebar) | 'horizontal' (bottom/top bar)
   const [orientation, setOrientation] = useState<'vertical' | 'horizontal'>('vertical');
+  const dragControls = useDragControls();
+
+  // Which tool panel is open: 'pen' | 'eraser' | null
+  const [openPanel, setOpenPanel] = useState<'pen' | 'eraser' | null>(null);
+
+  // Close panel when user starts drawing or switches to a non-panel tool
+  useEffect(() => {
+    if (isInteracting) {
+      setOpenPanel(null);
+    }
+  }, [isInteracting]);
+
+  useEffect(() => {
+    if (tool !== ShapeType.FREEHAND && openPanel === 'pen') setOpenPanel(null);
+    if (tool !== 'eraser' && openPanel === 'eraser') setOpenPanel(null);
+  }, [tool]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleColorChange = (c: string) => {
     updateCurrentStyle({ stroke: c });
     if (selectedIds.size > 0) {
       selectedIds.forEach((id) => {
         const el = elements[id];
-        if (el) {
-          updateElement(id, {
-            style: { ...el.style, stroke: c }
-          });
-        }
+        if (el) updateElement(id, { style: { ...el.style, stroke: c } });
       });
     }
   };
@@ -56,17 +244,17 @@ export function AdvancedToolbar() {
   const tools = [
     { id: 'select', icon: MousePointer, label: 'Select (V)' },
     { id: 'hand', icon: Hand, label: 'Hand (H)' },
-    null, // separator
+    null,
     { id: ShapeType.RECTANGLE, icon: Square, label: 'Rectangle (R)' },
     { id: ShapeType.CIRCLE, icon: Circle, label: 'Circle (O)' },
     { id: ShapeType.TRIANGLE, icon: Triangle, label: 'Triangle' },
     { id: ShapeType.DIAMOND, icon: Diamond, label: 'Diamond' },
     { id: ShapeType.STAR, icon: Star, label: 'Star' },
     { id: ShapeType.HEXAGON, icon: Hexagon, label: 'Hexagon' },
-    null, // separator
+    null,
     { id: ShapeType.LINE, icon: Minus, label: 'Line (L)' },
     { id: ShapeType.ARROW, icon: ArrowRight, label: 'Arrow (A)' },
-    null, // separator
+    null,
     { id: ShapeType.FREEHAND, icon: Pencil, label: 'Pen (P)' },
     { id: ShapeType.TEXT, icon: Type, label: 'Text (T)' },
     { id: ShapeType.IMAGE, icon: ImageIcon, label: 'Image' },
@@ -79,319 +267,233 @@ export function AdvancedToolbar() {
   const renderToolButton = (t: { id: string; icon: React.ElementType; label: string } | null, i: number) => {
     if (!t) {
       return isVertical
-        ? <div key={i} className="w-full h-px bg-zinc-200 dark:bg-zinc-800 my-1 shrink-0" />
-        : <div key={i} className="h-full w-px bg-zinc-200 dark:bg-zinc-800 mx-1 shrink-0" />;
+        ? <div key={i} className="w-full h-px bg-zinc-200 dark:bg-zinc-800 my-0.5 shrink-0" />
+        : <div key={i} className="h-5 w-px bg-zinc-200 dark:bg-zinc-800 mx-0.5 shrink-0" />;
     }
 
     const Icon = t.icon;
     const isActive = tool === t.id;
 
-    if (t.id === ShapeType.FREEHAND) {
-      return (
-        <div key={t.id} className="relative group shrink-0">
-          <button
-            onClick={() => setTool(t.id as import('@/types').Tool)}
-            className={`p-2 flex justify-center rounded transition-colors ${
-              isActive ? 'bg-foreground text-background' : 'text-foreground hover:bg-zinc-100 dark:hover:bg-zinc-800'
-            }`}
-          >
-            <Icon size={20} />
-          </button>
+    const handleClick = (e: React.MouseEvent) => {
+      e.stopPropagation();
+      setTool(t.id as import('@/types').Tool);
 
-          {/* Flyout Menu for Pen Types */}
-          <div className={`absolute ${isVertical ? 'left-full ml-2 top-0' : 'bottom-full mb-2 left-0'} bg-white dark:bg-[#1a1a1e] text-foreground rounded-lg shadow-xl opacity-0 group-hover:opacity-100 pointer-events-none group-hover:pointer-events-auto transition-opacity duration-200 delay-150 group-hover:delay-0 z-50 flex flex-col p-2 gap-1 border border-zinc-200 dark:border-zinc-800 min-w-[140px] ${isVertical ? 'before:absolute before:content-[\'\'] before:-left-2 before:top-0 before:w-2 before:h-full' : ''}`}>
-            <div className="text-[10px] font-semibold text-zinc-500 uppercase tracking-wider mb-1 px-2">Pen Type</div>
-            {(['pen', 'pencil', 'fountain', 'marker', 'highlighter'] as const).map(pt => (
-              <button
-                key={pt}
-                onClick={(e) => {
-                   e.stopPropagation();
-                   updateCurrentStyle({ penType: pt });
-                   setTool(ShapeType.FREEHAND);
-                }}
-                className={`text-left text-xs px-2 py-1.5 rounded capitalize transition-colors ${
-                  penType === pt 
-                    ? 'bg-foreground text-background font-medium' 
-                    : 'text-foreground hover:bg-zinc-100 dark:hover:bg-zinc-800'
-                }`}
-              >
-                {pt}
-              </button>
-            ))}
-            
-            <div className="w-full h-px bg-zinc-200 dark:bg-zinc-800 my-1" />
-            
-            <div className="text-[10px] font-semibold text-zinc-500 uppercase tracking-wider mb-1 px-2 mt-1">Color</div>
-            <div className="flex flex-wrap gap-1 px-1 pb-1 justify-center max-w-[160px]">
-              {PRESET_COLORS.map(c => (
-                <button
-                  key={c}
-                  className={`w-4 h-4 rounded-sm border ${currentStyle.stroke === c ? 'border-foreground scale-110 relative z-10 shadow-[0_0_0_2px_var(--foreground)]' : 'border-zinc-300 dark:border-zinc-700 hover:scale-110'} transition-all`}
-                  style={{ backgroundColor: c }}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    handleColorChange(c);
-                    setTool(ShapeType.FREEHAND);
-                  }}
-                  title={c}
-                />
-              ))}
-            </div>
-          </div>
-        </div>
-      );
-    }
+      if (t.id === ShapeType.FREEHAND) {
+        setOpenPanel((prev) => (prev === 'pen' ? null : 'pen'));
+      } else if (t.id === 'eraser') {
+        setOpenPanel((prev) => (prev === 'eraser' ? null : 'eraser'));
+      } else {
+        setOpenPanel(null);
+      }
+    };
 
-    // Eraser tool — simple button (options panel shows when active)
-    if (t.id === 'eraser') {
-      return (
-        <button
-          key={t.id}
-          onClick={() => setTool('eraser')}
-          className={`p-2 flex justify-center rounded transition-colors relative group shrink-0 ${
-            isActive ? 'bg-foreground text-background' : 'text-foreground hover:bg-zinc-100 dark:hover:bg-zinc-800'
-          }`}
-          title={t.label}
-        >
-          <Icon size={20} />
-          {/* Tooltip */}
-          <div className={`absolute ${isVertical ? 'left-full ml-2 top-1/2 -translate-y-1/2' : 'bottom-full mb-2 left-1/2 -translate-x-1/2'} bg-zinc-900 text-white text-xs px-2 py-1 rounded whitespace-nowrap opacity-0 group-hover:opacity-100 pointer-events-none transition-opacity z-50`}>
-            {t.label}
-          </div>
-        </button>
-      );
-    }
+    const tooltipClass = isVertical
+      ? 'absolute left-full ml-2 top-1/2 -translate-y-1/2'
+      : 'absolute bottom-full mb-2 left-1/2 -translate-x-1/2';
 
     return (
       <button
         key={t.id}
-        onClick={() => setTool(t.id as import('@/types').Tool)}
-        className={`p-2 rounded transition-colors relative group shrink-0 ${
+        onClick={handleClick}
+        className={`p-1.5 rounded transition-colors relative group shrink-0 flex items-center justify-center ${
           isActive ? 'bg-foreground text-background' : 'text-foreground hover:bg-zinc-100 dark:hover:bg-zinc-800'
         }`}
         title={t.label}
       >
-        <Icon size={20} />
-        {/* Tooltip */}
-        <div className={`absolute ${isVertical ? 'left-full ml-2 top-1/2 -translate-y-1/2' : 'bottom-full mb-2 left-1/2 -translate-x-1/2'} bg-zinc-900 text-white text-xs px-2 py-1 rounded whitespace-nowrap opacity-0 group-hover:opacity-100 pointer-events-none transition-opacity z-50`}>
+        <Icon size={18} />
+        <div className={`${tooltipClass} bg-zinc-900 text-white text-xs px-2 py-1 rounded whitespace-nowrap opacity-0 group-hover:opacity-100 pointer-events-none transition-opacity z-50`}>
           {t.label}
         </div>
       </button>
     );
   };
 
-  /* ── Shared eraser panel renderer ────────────────────────── */
-  const renderEraserPanel = () => {
-    if (tool !== 'eraser' || isInteracting) return null;
-
-    return (
-      <div
-        className={`fixed ${isVertical ? 'left-[76px] top-1/2 -translate-y-1/2' : 'bottom-36 left-1/2 -translate-x-1/2'} bg-white/95 dark:bg-[#1a1a1e]/95 backdrop-blur-md text-foreground rounded-xl shadow-[0_10px_40px_rgba(0,0,0,0.15)] dark:shadow-[0_10px_40px_rgba(0,0,0,0.5)] flex flex-col p-3 gap-2 border border-zinc-200 dark:border-zinc-800 w-[180px] z-50 pointer-events-auto`}
-        onPointerDown={(e) => e.stopPropagation()}
-      >
-        <div className="text-[10px] font-semibold text-zinc-500 uppercase tracking-wider px-1">Eraser Mode</div>
-        <button
-          onClick={() => updateEraser({ mode: 'object' })}
-          className={`text-left text-xs px-3 py-2 rounded-lg transition-colors ${
-            eraserSettings.mode === 'object'
-              ? 'bg-foreground text-background font-medium'
-              : 'text-foreground hover:bg-zinc-100 dark:hover:bg-zinc-800 border border-transparent'
-          }`}
-        >
-          <div className="font-medium">🧹 Object</div>
-          <div className="text-[10px] text-zinc-500 mt-0.5">Remove whole element</div>
-        </button>
-        <button
-          onClick={() => updateEraser({ mode: 'partial' })}
-          className={`text-left text-xs px-3 py-2 rounded-lg transition-colors ${
-            eraserSettings.mode === 'partial'
-              ? 'bg-foreground text-background font-medium'
-              : 'text-foreground hover:bg-zinc-100 dark:hover:bg-zinc-800 border border-transparent'
-          }`}
-        >
-          <div className="font-medium">✂️ Partial</div>
-          <div className="text-[10px] text-zinc-500 mt-0.5">Erase where you drag</div>
-        </button>
-
-        <div className="w-full h-px bg-zinc-200 dark:bg-zinc-800 my-1" />
-
-        <div className="text-[10px] font-semibold text-zinc-500 uppercase tracking-wider px-1">Size</div>
-        <div className="flex flex-col gap-1.5 px-1">
-          <div className="flex justify-between text-[10px] text-zinc-400">
-            <span>Radius</span>
-            <span>{eraserSettings.size}px</span>
-          </div>
-          <input
-            type="range"
-            min="5"
-            max="80"
-            step="5"
-            value={eraserSettings.size}
-            onChange={(e) => updateEraser({ size: parseInt(e.target.value) })}
-            className="accent-foreground w-full"
-          />
-          <div className="flex gap-1">
-            {[10, 20, 40, 60].map(sz => (
-              <button
-                key={sz}
-                onClick={() => updateEraser({ size: sz })}
-                className={`flex-1 text-[10px] py-1 rounded border transition-colors ${
-                  eraserSettings.size === sz
-                    ? 'border-foreground bg-foreground text-background'
-                    : 'border-zinc-300 dark:border-zinc-700 text-foreground hover:border-zinc-500'
-                }`}
-              >
-                {sz}
-              </button>
-            ))}
-          </div>
-        </div>
-      </div>
-    );
-  };
+  /* ── Portalled panels ─────────────────────────────────────── */
+  const panels = (
+    <AnimatePresence>
+      {openPanel === 'pen' && (
+        <PenPanel
+          key="pen-panel"
+          penType={penType}
+          stroke={currentStyle.stroke}
+          onPenType={(pt) => { updateCurrentStyle({ penType: pt as 'pen' | 'pencil' | 'fountain' | 'marker' | 'highlighter' }); setTool(ShapeType.FREEHAND); }}
+          onColor={(c) => { handleColorChange(c); setTool(ShapeType.FREEHAND); }}
+          onClose={() => setOpenPanel(null)}
+        />
+      )}
+      {openPanel === 'eraser' && (
+        <EraserPanel
+          key="eraser-panel"
+          mode={eraserSettings.mode}
+          size={eraserSettings.size}
+          onMode={(m) => updateEraser({ mode: m })}
+          onSize={(s) => updateEraser({ size: s })}
+          onClose={() => setOpenPanel(null)}
+        />
+      )}
+    </AnimatePresence>
+  );
 
   /* ── Vertical layout ──────────────────────────────────────── */
   if (isVertical) {
     return (
       <>
-      <motion.div
-        key="vertical-toolbar"
-        drag
-        dragMomentum={false}
-        className="fixed top-0 bottom-0 my-auto left-4 bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-lg shadow-lg p-2 flex flex-col gap-1 z-50 pointer-events-auto outline-none min-h-[80px] max-h-[90vh]"
-        style={{ height: '600px', width: '50px' }}
-      >
-        {/* Drag handle */}
-        <div className="w-full flex justify-center py-1 mb-1 text-zinc-400 hover:text-zinc-200 cursor-grab active:cursor-grabbing shrink-0">
-          <GripHorizontal size={16} />
-        </div>
-
-        {/* Orientation toggle */}
-        <button
-          onClick={() => setOrientation('horizontal')}
-          className="p-1.5 rounded hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors text-zinc-400 dark:text-zinc-500 shrink-0 relative group flex justify-center"
-          title="Switch to horizontal toolbar"
+        <motion.div
+          key="vertical-toolbar"
+          drag
+          dragControls={dragControls}
+          dragListener={false}
+          dragMomentum={false}
+          className="fixed left-3 bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-xl shadow-lg p-1.5 flex flex-col gap-0.5 z-50 pointer-events-auto outline-none"
+          style={{ width: '44px', top: '120px' }}
         >
-          <LayoutDashboard size={16} />
-          <div className="absolute left-full ml-2 top-1/2 -translate-y-1/2 bg-zinc-900 text-white text-xs px-2 py-1 rounded whitespace-nowrap opacity-0 group-hover:opacity-100 pointer-events-none transition-opacity z-50">
-            Horizontal mode
+          {/* Drag handle — only this initiates drag */}
+          <div
+            className="w-full flex justify-center py-0.5 text-zinc-400 hover:text-zinc-200 cursor-grab active:cursor-grabbing shrink-0"
+            onPointerDown={(e) => dragControls.start(e)}
+          >
+            <GripHorizontal size={14} />
           </div>
-        </button>
 
-        {/* Undo/Redo at top - pinned */}
-        <button
-          onClick={() => canUndo() && undo()}
-          className={`p-2 rounded transition-colors shrink-0 ${canUndo() ? 'text-zinc-600 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800' : 'text-zinc-300 dark:text-zinc-700 cursor-not-allowed'}`}
-          title="Undo (Ctrl+Z)"
-          disabled={!canUndo()}
-        >
-          <Undo2 size={20} />
-        </button>
-        <button
-          onClick={() => canRedo() && redo()}
-          className={`p-2 rounded transition-colors shrink-0 ${canRedo() ? 'text-zinc-600 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800' : 'text-zinc-300 dark:text-zinc-700 cursor-not-allowed'}`}
-          title="Redo (Ctrl+Y)"
-          disabled={!canRedo()}
-        >
-          <Redo2 size={20} />
-        </button>
+          {/* All other content stops propagation so clicks don't trigger drag */}
+          <div onPointerDown={(e) => e.stopPropagation()}>
+            {/* Orientation toggle */}
+            <button
+              onClick={() => setOrientation('horizontal')}
+              className="p-1.5 rounded hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors text-zinc-400 dark:text-zinc-500 shrink-0 relative group flex justify-center w-full"
+              title="Switch to horizontal toolbar"
+            >
+              <LayoutDashboard size={14} />
+              <div className="absolute left-full ml-2 top-1/2 -translate-y-1/2 bg-zinc-900 text-white text-xs px-2 py-1 rounded whitespace-nowrap opacity-0 group-hover:opacity-100 pointer-events-none transition-opacity z-50">
+                Horizontal mode
+              </div>
+            </button>
 
-        <div className="w-full h-px bg-zinc-200 dark:bg-zinc-800 my-1 shrink-0" />
+            <div className="w-full h-px bg-zinc-200 dark:bg-zinc-800 my-0.5 shrink-0" />
 
-        {/* Scrollable tools list — invisible scrollbar so it never overlaps icons */}
-        <div
-          className="flex flex-col gap-1 flex-1 min-h-0 overflow-y-auto overflow-x-hidden [&::-webkit-scrollbar]:hidden [-ms-overflow-style:none] [scrollbar-width:none]"
-        >
-          {tools.map((t, i) => renderToolButton(t, i))}
-        </div>
+            {/* Undo/Redo */}
+            <button
+              onClick={() => canUndo() && undo()}
+              className={`p-1.5 rounded transition-colors shrink-0 flex justify-center w-full ${canUndo() ? 'text-zinc-600 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800' : 'text-zinc-300 dark:text-zinc-700 cursor-not-allowed'}`}
+              title="Undo (Ctrl+Z)"
+              disabled={!canUndo()}
+            >
+              <Undo2 size={18} />
+            </button>
+            <button
+              onClick={() => canRedo() && redo()}
+              className={`p-1.5 rounded transition-colors shrink-0 flex justify-center w-full ${canRedo() ? 'text-zinc-600 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800' : 'text-zinc-300 dark:text-zinc-700 cursor-not-allowed'}`}
+              title="Redo (Ctrl+Y)"
+              disabled={!canRedo()}
+            >
+              <Redo2 size={18} />
+            </button>
 
-        {/* Global Color - pinned at bottom */}
-        <div className="w-full h-px bg-zinc-200 dark:bg-zinc-800 my-1 shrink-0" />
-        <div className="flex flex-col items-center py-1 shrink-0">
-          <ColorPicker 
-            color={currentStyle.stroke} 
-            onChange={handleColorChange} 
-            position="right"
-            size="lg"
-          />
-        </div>
-      </motion.div>
+            <div className="w-full h-px bg-zinc-200 dark:bg-zinc-800 my-0.5 shrink-0" />
 
-      {/* Eraser Options Panel */}
-      {renderEraserPanel()}
-    </>
+            {/* Tools */}
+            <div className="flex flex-col gap-0.5">
+              {tools.map((t, i) => renderToolButton(t, i))}
+            </div>
+
+            {/* Global Color */}
+            <div className="w-full h-px bg-zinc-200 dark:bg-zinc-800 my-0.5 shrink-0" />
+            <div className="flex flex-col items-center py-0.5 shrink-0">
+              <ColorPicker
+                color={currentStyle.stroke}
+                onChange={handleColorChange}
+                position="right"
+                size="lg"
+              />
+            </div>
+          </div>
+        </motion.div>
+
+        {/* Tool settings panels — always fixed top-right */}
+        {typeof window !== 'undefined' && createPortal(panels, document.body)}
+      </>
     );
   }
 
   /* ── Horizontal layout ────────────────────────────────────── */
   return (
     <>
-    <motion.div
-      key="horizontal-toolbar"
-      drag
-      dragMomentum={false}
-      className="fixed bottom-24 left-0 right-0 mx-auto bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-lg shadow-lg px-3 py-2 flex flex-row items-center gap-1 z-50 pointer-events-auto outline-none max-w-max"
-      style={{ width: 'max-content' }}
-    >
-      {/* Drag handle */}
-      <div className="flex items-center pr-1 text-zinc-400 hover:text-zinc-200 cursor-grab active:cursor-grabbing shrink-0">
-        <GripHorizontal size={16} />
-      </div>
-
-      <div className="h-6 w-px bg-zinc-200 dark:bg-zinc-800 mx-1 shrink-0" />
-
-      {/* Orientation toggle */}
-      <button
-        onClick={() => setOrientation('vertical')}
-        className="p-1.5 rounded hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors text-zinc-400 dark:text-zinc-500 shrink-0 relative group"
-        title="Switch to vertical toolbar"
+      <motion.div
+        key="horizontal-toolbar"
+        drag
+        dragControls={dragControls}
+        dragListener={false}
+        dragMomentum={false}
+        className="fixed bottom-20 left-0 right-0 mx-auto bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-xl shadow-lg px-2 py-1.5 flex flex-row items-center gap-0.5 z-50 pointer-events-auto outline-none"
+        style={{ width: 'max-content' }}
       >
-        <LayoutList size={16} />
-        <div className="absolute bottom-full mb-2 left-1/2 -translate-x-1/2 bg-zinc-900 text-white text-xs px-2 py-1 rounded whitespace-nowrap opacity-0 group-hover:opacity-100 pointer-events-none transition-opacity z-50">
-          Vertical mode
+        {/* Drag handle — only this initiates drag */}
+        <div
+          className="flex items-center pr-1 text-zinc-400 hover:text-zinc-200 cursor-grab active:cursor-grabbing shrink-0"
+          onPointerDown={(e) => dragControls.start(e)}
+        >
+          <GripHorizontal size={14} />
         </div>
-      </button>
 
-      <div className="h-6 w-px bg-zinc-200 dark:bg-zinc-800 mx-1 shrink-0" />
+        {/* All other content stops propagation so clicks don't trigger drag */}
+        <div className="flex flex-row items-center gap-0.5" onPointerDown={(e) => e.stopPropagation()}>
+          <div className="h-5 w-px bg-zinc-200 dark:bg-zinc-800 mx-0.5 shrink-0" />
 
-      {/* Undo/Redo */}
-      <button
-        onClick={() => canUndo() && undo()}
-        className={`p-2 rounded transition-colors shrink-0 ${canUndo() ? 'text-zinc-600 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800' : 'text-zinc-300 dark:text-zinc-700 cursor-not-allowed'}`}
-        title="Undo (Ctrl+Z)"
-        disabled={!canUndo()}
-      >
-        <Undo2 size={18} />
-      </button>
-      <button
-        onClick={() => canRedo() && redo()}
-        className={`p-2 rounded transition-colors shrink-0 ${canRedo() ? 'text-zinc-600 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800' : 'text-zinc-300 dark:text-zinc-700 cursor-not-allowed'}`}
-        title="Redo (Ctrl+Y)"
-        disabled={!canRedo()}
-      >
-        <Redo2 size={18} />
-      </button>
+          {/* Orientation toggle */}
+          <button
+            onClick={() => setOrientation('vertical')}
+            className="p-1.5 rounded hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors text-zinc-400 dark:text-zinc-500 shrink-0 relative group"
+            title="Switch to vertical toolbar"
+          >
+            <LayoutList size={14} />
+            <div className="absolute bottom-full mb-2 left-1/2 -translate-x-1/2 bg-zinc-900 text-white text-xs px-2 py-1 rounded whitespace-nowrap opacity-0 group-hover:opacity-100 pointer-events-none transition-opacity z-50">
+              Vertical mode
+            </div>
+          </button>
 
-      <div className="h-6 w-px bg-zinc-200 dark:bg-zinc-800 mx-1 shrink-0" />
+          <div className="h-5 w-px bg-zinc-200 dark:bg-zinc-800 mx-0.5 shrink-0" />
 
-      {/* Tools — horizontal row */}
-      <div className="flex flex-row items-center gap-1">
-        {tools.map((t, i) => renderToolButton(t, i))}
-      </div>
+          {/* Undo/Redo */}
+          <button
+            onClick={() => canUndo() && undo()}
+            className={`p-1.5 rounded transition-colors shrink-0 ${canUndo() ? 'text-zinc-600 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800' : 'text-zinc-300 dark:text-zinc-700 cursor-not-allowed'}`}
+            title="Undo (Ctrl+Z)"
+            disabled={!canUndo()}
+          >
+            <Undo2 size={16} />
+          </button>
+          <button
+            onClick={() => canRedo() && redo()}
+            className={`p-1.5 rounded transition-colors shrink-0 ${canRedo() ? 'text-zinc-600 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800' : 'text-zinc-300 dark:text-zinc-700 cursor-not-allowed'}`}
+            title="Redo (Ctrl+Y)"
+            disabled={!canRedo()}
+          >
+            <Redo2 size={16} />
+          </button>
 
-      <div className="h-6 w-px bg-zinc-200 dark:bg-zinc-800 mx-1 shrink-0" />
+          <div className="h-5 w-px bg-zinc-200 dark:bg-zinc-800 mx-0.5 shrink-0" />
 
-      {/* Global Color */}
-      <div className="flex items-center px-1 shrink-0">
-        <ColorPicker 
-          color={currentStyle.stroke} 
-          onChange={handleColorChange} 
-          position="top"
-          size="lg"
-        />
-      </div>
-    </motion.div>
-    {renderEraserPanel()}
+          {/* Tools */}
+          <div className="flex flex-row items-center gap-0.5">
+            {tools.map((t, i) => renderToolButton(t, i))}
+          </div>
+
+          <div className="h-5 w-px bg-zinc-200 dark:bg-zinc-800 mx-0.5 shrink-0" />
+
+          {/* Global Color */}
+          <div className="flex items-center px-0.5 shrink-0">
+            <ColorPicker
+              color={currentStyle.stroke}
+              onChange={handleColorChange}
+              position="top"
+              size="lg"
+            />
+          </div>
+        </div>
+      </motion.div>
+
+      {/* Tool settings panels — always fixed top-right */}
+      {typeof window !== 'undefined' && createPortal(panels, document.body)}
     </>
   );
 }
