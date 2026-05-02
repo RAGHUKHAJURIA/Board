@@ -2,10 +2,6 @@ import { create } from "zustand";
 import { immer } from "zustand/middleware/immer";
 import { GridSettings, SnapSettings, StyleProperties } from "@/types";
 
-interface EraserSettings {
-  mode: 'object' | 'partial';
-  size: number;
-}
 
 interface UIState {
   panels: {
@@ -17,7 +13,6 @@ interface UIState {
   snap: SnapSettings;
   theme: "dark" | "light" | "system";
   currentStyle: StyleProperties;
-  eraser: EraserSettings;
 
   // Actions
   togglePanel: (panel: keyof UIState["panels"]) => void;
@@ -25,7 +20,6 @@ interface UIState {
   updateSnap: (settings: Partial<SnapSettings>) => void;
   setTheme: (theme: "dark" | "light" | "system") => void;
   updateCurrentStyle: (style: Partial<StyleProperties>) => void;
-  updateEraser: (settings: Partial<EraserSettings>) => void;
 }
 
 export const useUIStore = create<UIState>()(
@@ -59,10 +53,6 @@ export const useUIStore = create<UIState>()(
       strokeStyle: "solid",
       penType: "pen",
     },
-    eraser: {
-      mode: 'object',
-      size: 30,
-    },
 
     togglePanel: (panel) =>
       set((state) => {
@@ -95,11 +85,6 @@ export const useUIStore = create<UIState>()(
     updateCurrentStyle: (style) =>
       set((state) => {
         state.currentStyle = { ...state.currentStyle, ...style };
-      }),
-
-    updateEraser: (settings) =>
-      set((state) => {
-        state.eraser = { ...state.eraser, ...settings };
       }),
   })),
 );

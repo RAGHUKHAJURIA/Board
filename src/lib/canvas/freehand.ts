@@ -17,22 +17,22 @@ export const renderFreehand = (
 
   switch (penType) {
     case 'pen':
-      renderPen(ctx, points, color, baseWidth, opacity);
+      renderPen(ctx, element, color, baseWidth, opacity);
       break;
     case 'pencil':
-      renderPencil(ctx, points, color, baseWidth, opacity);
+      renderPencil(ctx, element, color, baseWidth, opacity);
       break;
     case 'fountain':
-      renderFountain(ctx, points, color, baseWidth, opacity);
+      renderFountain(ctx, element, color, baseWidth, opacity);
       break;
     case 'marker':
-      renderMarker(ctx, points, color, baseWidth, opacity);
+      renderMarker(ctx, element, color, baseWidth, opacity);
       break;
     case 'highlighter':
-      renderHighlighter(ctx, points, color, baseWidth, opacity);
+      renderHighlighter(ctx, element, color, baseWidth, opacity);
       break;
     default:
-      renderPen(ctx, points, color, baseWidth, opacity);
+      renderPen(ctx, element, color, baseWidth, opacity);
   }
 
   ctx.restore();
@@ -41,19 +41,21 @@ export const renderFreehand = (
 /* ── Pen: smooth calligraphic stroke, pressure-sensitive width ── */
 function renderPen(
   ctx: CanvasRenderingContext2D,
-  points: [number, number, number?][],
+  element: FreehandElement,
   color: string,
   baseWidth: number,
   opacity: number
 ) {
+  const { points, simulatePressure, taperStart, taperEnd } = element;
   const outline = getStroke(points as [number, number, number][], {
     size: baseWidth * 2,
     thinning: 0.5,
     smoothing: 0.5,
     streamline: 0.5,
     easing: (t) => t,
-    start: { taper: 0, cap: true },
-    end: { taper: baseWidth, cap: true },
+    simulatePressure: simulatePressure !== false,
+    start: { taper: taperStart !== undefined ? taperStart : 0, cap: true },
+    end: { taper: taperEnd !== undefined ? taperEnd : baseWidth, cap: true },
   });
   if (!outline.length) return;
   ctx.globalAlpha = opacity;
@@ -64,11 +66,12 @@ function renderPen(
 /* ── Pencil: rough, grainy, slightly transparent with texture ── */
 function renderPencil(
   ctx: CanvasRenderingContext2D,
-  points: [number, number, number?][],
+  element: FreehandElement,
   color: string,
   baseWidth: number,
   opacity: number
 ) {
+  const { points } = element;
   if (points.length < 2) return;
 
   // Draw multiple overlapping thin strokes with jitter to simulate graphite grain
@@ -108,19 +111,21 @@ function renderPencil(
 /* ── Fountain: strong pressure-based width variation, calligraphic ── */
 function renderFountain(
   ctx: CanvasRenderingContext2D,
-  points: [number, number, number?][],
+  element: FreehandElement,
   color: string,
   baseWidth: number,
   opacity: number
 ) {
+  const { points, simulatePressure, taperStart, taperEnd } = element;
   const outline = getStroke(points as [number, number, number][], {
     size: baseWidth * 4,
     thinning: 0.8,
     smoothing: 0.8,
     streamline: 0.7,
     easing: (t) => Math.sin((t * Math.PI) / 2),
-    start: { taper: baseWidth * 3, cap: true },
-    end: { taper: baseWidth * 3, cap: true },
+    simulatePressure: simulatePressure !== false,
+    start: { taper: taperStart !== undefined ? taperStart : baseWidth * 3, cap: true },
+    end: { taper: taperEnd !== undefined ? taperEnd : baseWidth * 3, cap: true },
   });
   if (!outline.length) return;
   ctx.globalAlpha = opacity;
@@ -131,11 +136,12 @@ function renderFountain(
 /* ── Marker: broad, flat, slightly translucent with blunt ends ── */
 function renderMarker(
   ctx: CanvasRenderingContext2D,
-  points: [number, number, number?][],
+  element: FreehandElement,
   color: string,
   baseWidth: number,
   opacity: number
 ) {
+  const { points } = element;
   if (points.length < 2) return;
 
   // Draw a wide, flat stroke using quadratic curves
@@ -167,11 +173,12 @@ function renderMarker(
 /* ── Highlighter: very wide, flat, highly transparent, chisel tip ── */
 function renderHighlighter(
   ctx: CanvasRenderingContext2D,
-  points: [number, number, number?][],
+  element: FreehandElement,
   color: string,
   baseWidth: number,
   opacity: number
 ) {
+  const { points } = element;
   if (points.length < 2) return;
 
   const width = baseWidth * 8;

@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import { immer } from 'zustand/middleware/immer';
 import { enableMapSet } from 'immer';
 import { WhiteboardElement, Viewport, Tool } from '@/types';
+import { getElementBBox } from '@/lib/utils/geometry';
 
 // Enable Immer MapSet plugin for using Set/Map in Immer state
 enableMapSet();
@@ -58,6 +59,14 @@ interface CanvasState {
   zoomToFit: () => void;
   setZoom: (zoom: number) => void;
 
+  // Eraser Settings
+  eraserSettings: {
+    mode: 'object' | 'partial';
+    size: number;
+  };
+  setEraserMode: (mode: 'object' | 'partial') => void;
+  setEraserSize: (size: number) => void;
+
   // Batch erase (no history — caller manages snapshot)
   batchErase: (deleteIds: string[], addElements?: WhiteboardElement[]) => void;
 }
@@ -76,6 +85,18 @@ export const useCanvasStore = create<CanvasState>()(
     isInteracting: false,
     history: [{ elements: {} }],
     historyIndex: 0,
+    eraserSettings: {
+      mode: 'object',
+      size: 30,
+    },
+
+    setEraserMode: (mode) => set((state) => {
+      state.eraserSettings.mode = mode;
+    }),
+
+    setEraserSize: (size) => set((state) => {
+      state.eraserSettings.size = size;
+    }),
 
     setIsInteracting: (val) => set((state) => {
       state.isInteracting = val;
@@ -103,12 +124,15 @@ export const useCanvasStore = create<CanvasState>()(
       state.history = newHistory;
       state.historyIndex = newHistory.length - 1;
       
-      state.elements[element.id] = element;
+      const elWithBBox = { ...element, bbox: getElementBBox(element) };
+      state.elements[element.id] = elWithBBox as typeof state.elements[string];
     }),
 
     updateElement: (id, updates) => set((state) => {
       if (state.elements[id]) {
-        state.elements[id] = { ...state.elements[id]!, ...updates } as typeof state.elements[string];
+        const updated = { ...state.elements[id]!, ...updates } as typeof state.elements[string];
+        updated.bbox = getElementBBox(updated);
+        state.elements[id] = updated;
       }
     }),
 
@@ -135,7 +159,8 @@ export const useCanvasStore = create<CanvasState>()(
       });
       if (addElements) {
         addElements.forEach(el => {
-          state.elements[el.id] = el;
+          const elWithBBox = { ...el, bbox: getElementBBox(el) };
+          state.elements[el.id] = elWithBBox as typeof state.elements[string];
         });
       }
     }),
@@ -200,13 +225,15 @@ export const useCanvasStore = create<CanvasState>()(
 
       state.clipboard.forEach(el => {
         const newId = `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-        state.elements[newId] = {
+        const newEl = {
           ...JSON.parse(JSON.stringify(el)),
           id: newId,
           x: el.x + 20,
           y: el.y + 20,
           zIndex: Date.now() + Math.random(),
-        };
+        } as typeof state.elements[string];
+        newEl.bbox = getElementBBox(newEl);
+        state.elements[newId] = newEl;
         newIds.push(newId);
       });
       state.selectedIds = new Set(newIds);

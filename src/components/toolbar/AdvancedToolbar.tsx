@@ -206,12 +206,10 @@ function EraserPanel({
    Main Toolbar
 ═══════════════════════════════════════════════════════ */
 export function AdvancedToolbar() {
-  const { tool, setTool, undo, redo, canUndo, canRedo, selectedIds, elements, updateElement, isInteracting } = useCanvasStore();
+  const { tool, setTool, undo, redo, canUndo, canRedo, selectedIds, elements, updateElement, isInteracting, eraserSettings, setEraserMode, setEraserSize } = useCanvasStore();
   const currentStyle = useUIStore((state) => state.currentStyle);
   const penType = currentStyle.penType || 'pen';
   const updateCurrentStyle = useUIStore((state) => state.updateCurrentStyle);
-  const eraserSettings = useUIStore((state) => state.eraser);
-  const updateEraser = useUIStore((state) => state.updateEraser);
 
   const [orientation, setOrientation] = useState<'vertical' | 'horizontal'>('vertical');
   const dragControls = useDragControls();
@@ -326,8 +324,8 @@ export function AdvancedToolbar() {
           key="eraser-panel"
           mode={eraserSettings.mode}
           size={eraserSettings.size}
-          onMode={(m) => updateEraser({ mode: m })}
-          onSize={(s) => updateEraser({ size: s })}
+          onMode={(m) => setEraserMode(m)}
+          onSize={(s) => setEraserSize(s)}
           onClose={() => setOpenPanel(null)}
         />
       )}

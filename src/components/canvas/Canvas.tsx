@@ -5,12 +5,14 @@ import { useCanvasStore } from '@/store/canvas-store';
 import { useUIStore } from '@/store/ui-store';
 import { renderCanvas } from '@/lib/canvas/renderer';
 import { Point, ShapeType, WhiteboardElement, FreehandElement, ShapeElement, TextElement } from '@/types';
-import { isPointInBox } from '@/lib/utils/geometry';
+import { isPointInBox, isBoxIntersectingCapsule, pointToSegmentDistanceSq } from '@/lib/utils/geometry';
 import { SelectionBox } from './SelectionBox';
 import { ResizeHandle } from '@/lib/utils/transforms';
 import { resizeElement as calcResizedBounds } from '@/lib/utils/transforms';
 import { v4 as uuidv4 } from 'uuid';
-
+import { SpatialIndex } from '@/lib/canvas/spatial-index';
+import { EraserManager } from '@/lib/canvas/eraser-manager';
+import { debounce } from '@/lib/utils/debounce';
 type InteractionMode =
   | 'idle'
   | 'panning'
@@ -22,6 +24,7 @@ type InteractionMode =
   | 'rotating'
   | 'text-editing'
   | 'erasing';
+
 
 export function Canvas() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -35,7 +38,7 @@ export function Canvas() {
 
   const currentStyle = useUIStore(state => state.currentStyle);
   const grid = useUIStore(state => state.grid);
-  const eraserSettings = useUIStore(state => state.eraser);
+  const eraserSettings = useCanvasStore(state => state.eraserSettings);
 
   // Interaction state
   const modeRef = useRef<InteractionMode>('idle');
@@ -51,6 +54,11 @@ export function Canvas() {
 
   const currentElementRef = useRef<WhiteboardElement | null>(null);
   const lastPointerPos = useRef<Point>({ x: 0, y: 0 }); // screen coords
+  const lastPointerWorldPos = useRef<Point | null>(null); // world coords for sweep testing
+  const spatialIndexRef = useRef<SpatialIndex>(new SpatialIndex());
+  const eraserRef = useRef<EraserManager | null>(null);
+  const eraseDirty = useRef(false);
+  const eraseAccumulated = useRef<{ toDelete: string[], toAdd: WhiteboardElement[] }>({ toDelete: [], toAdd: [] });
   const dragStartElementPositions = useRef<Record<string, Point>>({});
   const resizeHandleRef = useRef<ResizeHandle | null>(null);
   const resizeStartBounds = useRef<{ x: number; y: number; width: number; height: number } | null>(null);
@@ -58,6 +66,23 @@ export function Canvas() {
   const rotateStartAngle = useRef<number>(0);
   const rotateCenter = useRef<Point>({ x: 0, y: 0 });
   const rotateElementIdRef = useRef<string | null>(null);
+
+  // Initialize EraserManager
+  useEffect(() => {
+    eraserRef.current = new EraserManager(spatialIndexRef.current);
+  }, []);
+
+  // Keep spatial index up to date (debounced)
+  const debouncedUpdateIndex = useCallback(
+    debounce((els: Record<string, WhiteboardElement>) => {
+      spatialIndexRef.current.rebuild(els);
+    }, 100),
+    []
+  );
+
+  useEffect(() => {
+    debouncedUpdateIndex(elements);
+  }, [elements, debouncedUpdateIndex]);
 
   // Handle resize setup
   const updateCanvasSize = useCallback(() => {
@@ -138,105 +163,6 @@ export function Canvas() {
       .map(id => elements[id])
       .filter(Boolean) as WhiteboardElement[];
 
-  // Batch erase: partial mode splits freehand strokes, deletes other elements touching the eraser circle.
-  // We use getState() for reads and mutate everything in one deleteElements/addElement pass to avoid
-  // polluting the undo history with dozens of intermediate snapshots.
-  const performPartialErase = (world: Point, radius: number) => {
-    const freshEls = useCanvasStore.getState().elements;
-    const toDelete: string[] = [];
-    const toAdd: WhiteboardElement[] = [];
-
-    for (const el of Object.values(freshEls)) {
-      if (el.type === ShapeType.FREEHAND) {
-        const fh = el as FreehandElement;
-        // Check if any SEGMENT of the stroke passes within eraser radius
-        // (point-only check misses sparse strokes drawn quickly)
-        let hit = false;
-        for (let i = 0; i < fh.points.length; i++) {
-          const [ax, ay] = fh.points[i]!;
-          if (i < fh.points.length - 1) {
-            const [bx, by] = fh.points[i + 1]!;
-            const dx = bx - ax, dy = by - ay;
-            const lenSq = dx * dx + dy * dy;
-            let dist: number;
-            if (lenSq === 0) {
-              dist = Math.hypot(world.x - ax, world.y - ay);
-            } else {
-              const t = Math.max(0, Math.min(1, ((world.x - ax) * dx + (world.y - ay) * dy) / lenSq));
-              dist = Math.hypot(world.x - (ax + t * dx), world.y - (ay + t * dy));
-            }
-            if (dist < radius) { hit = true; break; }
-          } else {
-            if (Math.hypot(world.x - ax, world.y - ay) < radius) { hit = true; break; }
-          }
-        }
-        if (!hit) continue;
-
-        // Split into surviving segments — erase points that are within radius of eraser
-        const remaining: [number, number, number?][][] = [];
-        let currentSegment: [number, number, number?][] = [];
-        for (let si = 0; si < fh.points.length; si++) {
-          const pt = fh.points[si]!;
-          const [px, py] = pt;
-          // Check point proximity
-          let erased = Math.hypot(world.x - px, world.y - py) < radius;
-          // Also erase if the segment FROM the previous point passes through the eraser
-          if (!erased && si > 0) {
-            const [ppx, ppy] = fh.points[si - 1]!;
-            const dx2 = px - ppx, dy2 = py - ppy;
-            const lenSq2 = dx2 * dx2 + dy2 * dy2;
-            if (lenSq2 > 0) {
-              const t2 = Math.max(0, Math.min(1, ((world.x - ppx) * dx2 + (world.y - ppy) * dy2) / lenSq2));
-              const segDist = Math.hypot(world.x - (ppx + t2 * dx2), world.y - (ppy + t2 * dy2));
-              if (segDist < radius) erased = true;
-            }
-          }
-          if (erased) {
-            if (currentSegment.length >= 2) remaining.push([...currentSegment]);
-            currentSegment = [];
-          } else {
-            currentSegment.push(pt);
-          }
-        }
-        if (currentSegment.length >= 2) remaining.push(currentSegment);
-
-        toDelete.push(el.id);
-
-        for (const segment of remaining) {
-          const xs = segment.map(([x]) => x);
-          const ys = segment.map(([, y]) => y);
-          const newFh: FreehandElement = {
-            id: uuidv4(),
-            type: ShapeType.FREEHAND,
-            x: Math.min(...xs),
-            y: Math.min(...ys),
-            width: Math.max(...xs) - Math.min(...xs),
-            height: Math.max(...ys) - Math.min(...ys),
-            rotation: fh.rotation,
-            locked: false,
-            zIndex: Date.now() + Math.random(),
-            style: { ...fh.style },
-            points: segment,
-          };
-          toAdd.push(newFh);
-        }
-      } else {
-        // Non-freehand: bounding-box hit test
-        const box = {
-          minX: el.x - radius,
-          minY: el.y - radius,
-          maxX: el.x + el.width + radius,
-          maxY: el.y + el.height + radius,
-        };
-        if (isPointInBox(world, box)) toDelete.push(el.id);
-      }
-    }
-
-    if (toDelete.length === 0 && toAdd.length === 0) return;
-
-    // Apply all changes without touching undo history (snapshot taken once at pointerdown)
-    batchErase(toDelete, toAdd.length > 0 ? toAdd : undefined);
-  };
 
   const handlePointerDown = (e: React.PointerEvent) => {
     if (e.button === 2) return; // ignore right-click
@@ -251,6 +177,7 @@ export function Canvas() {
     const screen: Point = { x: e.clientX, y: e.clientY };
     const world = screenToWorld(e.clientX, e.clientY);
     lastPointerPos.current = screen;
+    lastPointerWorldPos.current = world;
 
     // Middle button or hand tool → pan
     if (e.button === 1 || tool === 'hand') {
@@ -301,22 +228,33 @@ export function Canvas() {
 
     // Eraser tool
     if (tool === 'eraser') {
-      // Save ONE snapshot before the whole erase gesture (not per-element)
       saveSnapshot();
-      const eraserRadius = eraserSettings.size / 2;
-
-      if (eraserSettings.mode === 'object') {
-        // Object mode: delete ALL elements under cursor in one pass
-        const freshEls = useCanvasStore.getState().elements;
-        const toDelete = Object.values(freshEls)
-          .filter(el => isPointNearElement(world, el, eraserRadius))
-          .map(el => el.id);
-        if (toDelete.length > 0) {
-          batchErase(toDelete);
+      eraserRef.current?.startErase(world);
+      
+      // Perform initial erase
+      if (eraserRef.current) {
+        const { toDelete, toAdd } = eraserRef.current.erase(
+          world,
+          useCanvasStore.getState().elements,
+          eraserSettings,
+          viewport.zoom
+        );
+        
+        if (toDelete.length > 0 || toAdd.length > 0) {
+          eraseAccumulated.current.toDelete.push(...toDelete);
+          eraseAccumulated.current.toAdd.push(...toAdd);
+          
+          if (!eraseDirty.current) {
+            eraseDirty.current = true;
+            requestAnimationFrame(() => {
+              batchErase(eraseAccumulated.current.toDelete, eraseAccumulated.current.toAdd);
+              eraseAccumulated.current = { toDelete: [], toAdd: [] };
+              eraseDirty.current = false;
+            });
+          }
         }
-      } else {
-        performPartialErase(world, eraserRadius);
       }
+      
       setMode('erasing');
       return;
     }
@@ -542,18 +480,29 @@ export function Canvas() {
       }
 
       case 'erasing': {
-        const eraserRadius = eraserSettings.size / 2;
-        if (eraserSettings.mode === 'object') {
-          // Delete all elements under the moving eraser in one pass
-          const freshEls = useCanvasStore.getState().elements;
-          const toDelete = Object.values(freshEls)
-            .filter(el => isPointNearElement(world, el, eraserRadius))
-            .map(el => el.id);
-          if (toDelete.length > 0) {
-            batchErase(toDelete);
+        if (eraserRef.current) {
+          const { toDelete, toAdd } = eraserRef.current.erase(
+            world,
+            useCanvasStore.getState().elements,
+            eraserSettings,
+            viewport.zoom
+          );
+          
+          if (toDelete.length > 0 || toAdd.length > 0) {
+            eraseAccumulated.current.toDelete.push(...toDelete);
+            eraseAccumulated.current.toAdd.push(...toAdd);
+            
+            // Note: spatial index will be updated optimistically via debounce
+            
+            if (!eraseDirty.current) {
+              eraseDirty.current = true;
+              requestAnimationFrame(() => {
+                batchErase(eraseAccumulated.current.toDelete, eraseAccumulated.current.toAdd);
+                eraseAccumulated.current = { toDelete: [], toAdd: [] };
+                eraseDirty.current = false;
+              });
+            }
           }
-        } else {
-          performPartialErase(world, eraserRadius);
         }
         break;
       }
@@ -563,6 +512,7 @@ export function Canvas() {
     }
 
     lastPointerPos.current = screen;
+    lastPointerWorldPos.current = world;
   };
 
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
@@ -606,7 +556,7 @@ export function Canvas() {
     }
 
     if (prevMode === 'erasing') {
-      // erasing already performed inline; nothing extra needed
+      eraserRef.current?.endErase();
     }
 
     setMode('idle');
@@ -883,45 +833,6 @@ export function Canvas() {
       )}
     </div>
   );
-}
-
-/* ─── Helper: Check if a point is near an element ─────────────────────────── */
-/** Returns the minimum distance from point P to segment AB */
-function pointToSegmentDist(px: number, py: number, ax: number, ay: number, bx: number, by: number): number {
-  const dx = bx - ax;
-  const dy = by - ay;
-  const lenSq = dx * dx + dy * dy;
-  if (lenSq === 0) return Math.hypot(px - ax, py - ay);
-  const t = Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / lenSq));
-  return Math.hypot(px - (ax + t * dx), py - (ay + t * dy));
-}
-
-function isPointNearElement(world: Point, el: WhiteboardElement, radius: number): boolean {
-  if (el.type === ShapeType.FREEHAND) {
-    const fh = el as FreehandElement;
-    if (fh.points.length === 0) return false;
-    // Check each LINE SEGMENT between consecutive points, not just the points themselves.
-    // This catches sparse strokes where the eraser passes between recorded points.
-    for (let i = 0; i < fh.points.length; i++) {
-      const [ax, ay] = fh.points[i]!;
-      if (i === fh.points.length - 1) {
-        // Last point: check point-to-point distance
-        if (Math.hypot(world.x - ax, world.y - ay) < radius) return true;
-      } else {
-        const [bx, by] = fh.points[i + 1]!;
-        if (pointToSegmentDist(world.x, world.y, ax, ay, bx, by) < radius) return true;
-      }
-    }
-    return false;
-  }
-  // For shapes/text/images: expand bounding box by radius
-  const box = {
-    minX: el.x - radius,
-    minY: el.y - radius,
-    maxX: el.x + el.width + radius,
-    maxY: el.y + el.height + radius,
-  };
-  return isPointInBox(world, box);
 }
 
 /* ─── Eraser Cursor Component ─────────────────────────────────────────────── */

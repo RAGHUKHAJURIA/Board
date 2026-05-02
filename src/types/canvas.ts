@@ -44,6 +44,7 @@ export interface BaseElement {
   locked: boolean;
   zIndex: number;
   style: StyleProperties;
+  bbox?: BoundingBox;
 }
 
 export interface ShapeElement extends BaseElement {
@@ -54,6 +55,9 @@ export interface ShapeElement extends BaseElement {
 export interface FreehandElement extends BaseElement {
   type: ShapeType.FREEHAND;
   points: [number, number, number?][]; // [x, y, pressure]
+  simulatePressure?: boolean;
+  taperStart?: number | boolean;
+  taperEnd?: number | boolean;
 }
 
 export interface TextElement extends BaseElement {
