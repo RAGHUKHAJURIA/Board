@@ -80,11 +80,14 @@ export interface ConnectorElement extends BaseElement {
   startY: number;
   endX: number;
   endY: number;
-  startElementId?: string;
-  endElementId?: string;
-  startPosition?: 'top' | 'right' | 'bottom' | 'left' | 'center';
-  endPosition?: 'top' | 'right' | 'bottom' | 'left' | 'center';
-  curved?: boolean;
+  startElementId?: string | null;
+  endElementId?: string | null;
+  startAnchorPoint?: 'top' | 'right' | 'bottom' | 'left' | 'center';
+  endAnchorPoint?: 'top' | 'right' | 'bottom' | 'left' | 'center';
+  controlPoints?: { x: number, y: number }[];
+  routingMode?: 'straight' | 'curved' | 'orthogonal';
+  isManuallyRouted?: boolean;
+  curved?: boolean; // Deprecated, use routingMode
   label?: string;
   seed: number;
 }

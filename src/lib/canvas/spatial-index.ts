@@ -1,4 +1,5 @@
 import RBush from 'rbush';
+import { WhiteboardElement } from '@/types';
 
 export interface IndexedElement {
   minX: number;
@@ -6,7 +7,7 @@ export interface IndexedElement {
   maxX: number;
   maxY: number;
   id: string;
-  element: any;
+  element: WhiteboardElement;
 }
 
 export class SpatialIndex {
@@ -19,75 +20,81 @@ export class SpatialIndex {
   /**
    * Get bounding box for any element type
    */
-  private getBoundingBox(element: any): {
+  private getBoundingBox(element: WhiteboardElement): {
     minX: number;
     minY: number;
     maxX: number;
     maxY: number;
   } {
-    let minX = element.x;
-    let minY = element.y;
-    let maxX = element.x + element.width;
-    let maxY = element.y + element.height;
-    
-    // Special handling for freehand/stroke elements
+    // CRITICAL: Always use Math.min/max so bounding boxes are never inverted.
+    // Lines/Arrows drawn in any direction have negative width or height.
+    let minX = Math.min(element.x, element.x + element.width);
+    let minY = Math.min(element.y, element.y + element.height);
+    let maxX = Math.max(element.x, element.x + element.width);
+    let maxY = Math.max(element.y, element.y + element.height);
+
+    // Connectors: use actual start/end positions (not width/height)
+    if (element.type === 'connector') {
+      const conn = element as import('@/types').ConnectorElement;
+      minX = Math.min(conn.startX, conn.endX);
+      minY = Math.min(conn.startY, conn.endY);
+      maxX = Math.max(conn.startX, conn.endX);
+      maxY = Math.max(conn.startY, conn.endY);
+      // Include any control points
+      if (conn.controlPoints) {
+        conn.controlPoints.forEach(cp => {
+          minX = Math.min(minX, cp.x);
+          minY = Math.min(minY, cp.y);
+          maxX = Math.max(maxX, cp.x);
+          maxY = Math.max(maxY, cp.y);
+        });
+      }
+    }
+
+    // Freehand: iterate actual points (they are absolute world coords)
     if (element.type === 'freehand' && element.points) {
-      minX = Infinity;
-      minY = Infinity;
-      maxX = -Infinity;
-      maxY = -Infinity;
-      
-      element.points.forEach((pt: number[]) => {
-        minX = Math.min(minX, pt[0]);
-        minY = Math.min(minY, pt[1]);
-        maxX = Math.max(maxX, pt[0]);
-        maxY = Math.max(maxY, pt[1]);
+      minX = Infinity; minY = Infinity; maxX = -Infinity; maxY = -Infinity;
+      element.points.forEach((pt: [number, number, number?]) => {
+        if (pt[0] < minX) minX = pt[0];
+        if (pt[1] < minY) minY = pt[1];
+        if (pt[0] > maxX) maxX = pt[0];
+        if (pt[1] > maxY) maxY = pt[1];
       });
-      
-      // Add padding for stroke width
-      const padding = (element.style?.strokeWidth || 2) / 2;
-      minX -= padding;
-      minY -= padding;
-      maxX += padding;
-      maxY += padding;
     }
-    
-    // Add rotation bounds if rotated
+
+    // Padding for stroke width so thin lines are always findable
+    const pad = Math.max((element.style?.strokeWidth ?? 2) / 2, 4);
+    minX -= pad; minY -= pad; maxX += pad; maxY += pad;
+
+    // Rotation: expand bbox to cover rotated corners
     if (element.rotation && element.rotation !== 0) {
-      const centerX = element.x + element.width / 2;
-      const centerY = element.y + element.height / 2;
-      const angle = element.rotation; // Already in radians based on geometry utils
-      
-      // Calculate rotated corners
+      const cx = (minX + maxX) / 2;
+      const cy = (minY + maxY) / 2;
+      const angle = element.rotation;
+      const cos = Math.cos(angle);
+      const sin = Math.sin(angle);
       const corners = [
-        { x: element.x, y: element.y },
-        { x: element.x + element.width, y: element.y },
-        { x: element.x + element.width, y: element.y + element.height },
-        { x: element.x, y: element.y + element.height },
+        { x: minX, y: minY }, { x: maxX, y: minY },
+        { x: maxX, y: maxY }, { x: minX, y: maxY },
       ];
-      
-      const rotatedCorners = corners.map(corner => {
-        const dx = corner.x - centerX;
-        const dy = corner.y - centerY;
-        return {
-          x: centerX + dx * Math.cos(angle) - dy * Math.sin(angle),
-          y: centerY + dx * Math.sin(angle) + dy * Math.cos(angle),
-        };
-      });
-      
-      minX = Math.min(...rotatedCorners.map(c => c.x));
-      minY = Math.min(...rotatedCorners.map(c => c.y));
-      maxX = Math.max(...rotatedCorners.map(c => c.x));
-      maxY = Math.max(...rotatedCorners.map(c => c.y));
+      const rotated = corners.map(c => ({
+        x: cx + (c.x - cx) * cos - (c.y - cy) * sin,
+        y: cy + (c.x - cx) * sin + (c.y - cy) * cos,
+      }));
+      minX = Math.min(...rotated.map(c => c.x));
+      minY = Math.min(...rotated.map(c => c.y));
+      maxX = Math.max(...rotated.map(c => c.x));
+      maxY = Math.max(...rotated.map(c => c.y));
     }
-    
+
     return { minX, minY, maxX, maxY };
   }
+
   
   /**
    * Insert or update element in index
    */
-  insert(element: any) {
+  insert(element: WhiteboardElement) {
     // Remove if already exists
     this.remove(element.id);
     
@@ -133,7 +140,7 @@ export class SpatialIndex {
   /**
    * Rebuild entire index
    */
-  rebuild(elements: Record<string, any> | Map<string, any>) {
+  rebuild(elements: Record<string, WhiteboardElement> | Map<string, WhiteboardElement>) {
     this.clear();
     
     // Handle both Object and Map for compatibility

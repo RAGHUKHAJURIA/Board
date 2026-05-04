@@ -113,10 +113,11 @@ export const getElementBBox = (el: WhiteboardElement): BoundingBox => {
     }
     return { minX, minY, maxX, maxY };
   } else if (el.type === ShapeType.CONNECTOR) {
-    const minX = Math.min(el.x, el.endX || el.x);
-    const maxX = Math.max(el.x, el.endX || el.x);
-    const minY = Math.min(el.y, el.endY || el.y);
-    const maxY = Math.max(el.y, el.endY || el.y);
+    const conn = el as import('@/types').ConnectorElement;
+    const minX = Math.min(conn.startX, conn.endX);
+    const maxX = Math.max(conn.startX, conn.endX);
+    const minY = Math.min(conn.startY, conn.endY);
+    const maxY = Math.max(conn.startY, conn.endY);
     return { minX, minY, maxX, maxY };
   } else {
     // For rotated shapes, calculate the envelope box

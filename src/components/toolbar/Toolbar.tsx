@@ -56,7 +56,7 @@ export function Toolbar() {
         />
         <ToolButton 
           icon={ArrowRight} label="Arrow" shortcut="A" 
-          isActive={tool === ShapeType.ARROW} onClick={() => setTool(ShapeType.ARROW)} 
+          isActive={tool === ShapeType.CONNECTOR} onClick={() => setTool(ShapeType.CONNECTOR)} 
         />
         
         <div className="w-[1px] h-8 bg-zinc-800 mx-1" />

@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import { immer } from 'zustand/middleware/immer';
 import { enableMapSet } from 'immer';
-import { WhiteboardElement, Viewport, Tool } from '@/types';
+import { WhiteboardElement, ConnectorElement, Viewport, Tool, ShapeType } from '@/types';
 import { getElementBBox } from '@/lib/utils/geometry';
 
 // Enable Immer MapSet plugin for using Set/Map in Immer state
@@ -69,6 +69,13 @@ interface CanvasState {
 
   // Batch erase (no history — caller manages snapshot)
   batchErase: (deleteIds: string[], addElements?: WhiteboardElement[]) => void;
+
+  // Connectors
+  connectorsByElement: Record<string, string[]>;
+  updateAttachedConnectors: (elementId: string, recalculatePath: (connector: ConnectorElement, elements: Record<string, WhiteboardElement>) => void) => void;
+  detachConnectorsFromElement: (elementId: string) => void;
+  finalizeConnectorReshape: (connectorId: string) => void;
+  setConnectorRoutingMode: (connectorId: string, mode: 'straight' | 'curved' | 'orthogonal') => void;
 }
 
 const cloneElements = (elements: Record<string, WhiteboardElement>): Record<string, WhiteboardElement> => {
@@ -85,6 +92,7 @@ export const useCanvasStore = create<CanvasState>()(
     isInteracting: false,
     history: [{ elements: {} }],
     historyIndex: 0,
+    connectorsByElement: {},
     eraserSettings: {
       mode: 'object',
       size: 30,
@@ -104,7 +112,12 @@ export const useCanvasStore = create<CanvasState>()(
 
     setTool: (tool) => set((state) => {
       state.tool = tool;
+      // Clear selection when switching to select tool so nothing is pre-selected
+      if (tool === 'select') {
+        state.selectedIds.clear();
+      }
     }),
+
 
     saveSnapshot: () => set((state) => {
       // Truncate future if we're not at the end
@@ -126,12 +139,51 @@ export const useCanvasStore = create<CanvasState>()(
       
       const elWithBBox = { ...element, bbox: getElementBBox(element) };
       state.elements[element.id] = elWithBBox as typeof state.elements[string];
+
+      // Update connectors index if it's a connector
+      if (element.type === ShapeType.CONNECTOR) {
+        const conn = element as ConnectorElement;
+        if (conn.startElementId) {
+          if (!state.connectorsByElement[conn.startElementId]) state.connectorsByElement[conn.startElementId] = [];
+          if (!state.connectorsByElement[conn.startElementId].includes(conn.id)) state.connectorsByElement[conn.startElementId].push(conn.id);
+        }
+        if (conn.endElementId) {
+          if (!state.connectorsByElement[conn.endElementId]) state.connectorsByElement[conn.endElementId] = [];
+          if (!state.connectorsByElement[conn.endElementId].includes(conn.id)) state.connectorsByElement[conn.endElementId].push(conn.id);
+        }
+      }
     }),
 
     updateElement: (id, updates) => set((state) => {
       if (state.elements[id]) {
         const updated = { ...state.elements[id]!, ...updates } as typeof state.elements[string];
         updated.bbox = getElementBBox(updated);
+        
+        // Handle connector specific changes
+        if (updated.type === ShapeType.CONNECTOR) {
+          const oldConn = state.elements[id] as ConnectorElement;
+          const newConn = updated as ConnectorElement;
+          
+          if (oldConn.startElementId !== newConn.startElementId) {
+            if (oldConn.startElementId && state.connectorsByElement[oldConn.startElementId]) {
+              state.connectorsByElement[oldConn.startElementId] = state.connectorsByElement[oldConn.startElementId].filter(cid => cid !== id);
+            }
+            if (newConn.startElementId) {
+              if (!state.connectorsByElement[newConn.startElementId]) state.connectorsByElement[newConn.startElementId] = [];
+              if (!state.connectorsByElement[newConn.startElementId].includes(id)) state.connectorsByElement[newConn.startElementId].push(id);
+            }
+          }
+          if (oldConn.endElementId !== newConn.endElementId) {
+            if (oldConn.endElementId && state.connectorsByElement[oldConn.endElementId]) {
+              state.connectorsByElement[oldConn.endElementId] = state.connectorsByElement[oldConn.endElementId].filter(cid => cid !== id);
+            }
+            if (newConn.endElementId) {
+              if (!state.connectorsByElement[newConn.endElementId]) state.connectorsByElement[newConn.endElementId] = [];
+              if (!state.connectorsByElement[newConn.endElementId].includes(id)) state.connectorsByElement[newConn.endElementId].push(id);
+            }
+          }
+        }
+        
         state.elements[id] = updated;
       }
     }),
@@ -145,6 +197,20 @@ export const useCanvasStore = create<CanvasState>()(
       state.historyIndex = newHistory.length - 1;
 
       ids.forEach(id => {
+        // Also call detachConnectorsFromElement
+        get().detachConnectorsFromElement(id);
+        
+        const el = state.elements[id];
+        if (el?.type === ShapeType.CONNECTOR) {
+          const conn = el as ConnectorElement;
+          if (conn.startElementId && state.connectorsByElement[conn.startElementId]) {
+            state.connectorsByElement[conn.startElementId] = state.connectorsByElement[conn.startElementId].filter(cid => cid !== id);
+          }
+          if (conn.endElementId && state.connectorsByElement[conn.endElementId]) {
+            state.connectorsByElement[conn.endElementId] = state.connectorsByElement[conn.endElementId].filter(cid => cid !== id);
+          }
+        }
+        
         delete state.elements[id];
         state.selectedIds.delete(id);
       });
@@ -154,6 +220,19 @@ export const useCanvasStore = create<CanvasState>()(
     // Used by the eraser during a drag gesture (snapshot is saved once at pointerdown).
     batchErase: (deleteIds, addElements) => set((state) => {
       deleteIds.forEach(id => {
+        get().detachConnectorsFromElement(id);
+        
+        const el = state.elements[id];
+        if (el?.type === ShapeType.CONNECTOR) {
+          const conn = el as ConnectorElement;
+          if (conn.startElementId && state.connectorsByElement[conn.startElementId]) {
+            state.connectorsByElement[conn.startElementId] = state.connectorsByElement[conn.startElementId].filter(cid => cid !== id);
+          }
+          if (conn.endElementId && state.connectorsByElement[conn.endElementId]) {
+            state.connectorsByElement[conn.endElementId] = state.connectorsByElement[conn.endElementId].filter(cid => cid !== id);
+          }
+        }
+        
         delete state.elements[id];
         state.selectedIds.delete(id);
       });
@@ -162,6 +241,53 @@ export const useCanvasStore = create<CanvasState>()(
           const elWithBBox = { ...el, bbox: getElementBBox(el) };
           state.elements[el.id] = elWithBBox as typeof state.elements[string];
         });
+      }
+    }),
+
+    updateAttachedConnectors: (elementId, recalculatePath) => set((state) => {
+      const connIds = state.connectorsByElement[elementId];
+      if (!connIds || connIds.length === 0) return;
+      
+      connIds.forEach(connId => {
+        const connector = state.elements[connId] as ConnectorElement;
+        if (!connector || connector.isManuallyRouted) return; // Don't auto-route if manually routed
+        
+        // Pass to the callback to calculate positions and control points
+        recalculatePath(connector, state.elements);
+      });
+    }),
+
+    detachConnectorsFromElement: (elementId) => set((state) => {
+      const connIds = state.connectorsByElement[elementId];
+      if (!connIds) return;
+      
+      connIds.forEach(connId => {
+        const conn = state.elements[connId] as ConnectorElement;
+        if (!conn) return;
+        
+        if (conn.startElementId === elementId) {
+          conn.startElementId = null;
+        }
+        if (conn.endElementId === elementId) {
+          conn.endElementId = null;
+        }
+      });
+      
+      state.connectorsByElement[elementId] = [];
+    }),
+
+    finalizeConnectorReshape: (connectorId) => set((state) => {
+      const conn = state.elements[connectorId] as ConnectorElement;
+      if (conn) {
+        conn.isManuallyRouted = true;
+      }
+    }),
+
+    setConnectorRoutingMode: (connectorId, mode) => set((state) => {
+      const conn = state.elements[connectorId] as ConnectorElement;
+      if (conn) {
+        conn.routingMode = mode;
+        conn.isManuallyRouted = false; // Reset manual routing
       }
     }),
 

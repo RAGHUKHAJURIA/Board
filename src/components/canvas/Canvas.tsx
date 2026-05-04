@@ -4,15 +4,17 @@ import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { useCanvasStore } from '@/store/canvas-store';
 import { useUIStore } from '@/store/ui-store';
 import { renderCanvas } from '@/lib/canvas/renderer';
-import { Point, ShapeType, WhiteboardElement, FreehandElement, ShapeElement, TextElement } from '@/types';
-import { isPointInBox, isBoxIntersectingCapsule, pointToSegmentDistanceSq } from '@/lib/utils/geometry';
+import { Point, ShapeType, WhiteboardElement, FreehandElement, ShapeElement, TextElement, ConnectorElement } from '@/types';
+import { isPointInBox } from '@/lib/utils/geometry';
 import { SelectionBox } from './SelectionBox';
 import { ResizeHandle } from '@/lib/utils/transforms';
 import { resizeElement as calcResizedBounds } from '@/lib/utils/transforms';
 import { v4 as uuidv4 } from 'uuid';
 import { SpatialIndex } from '@/lib/canvas/spatial-index';
 import { EraserManager } from '@/lib/canvas/eraser-manager';
+import { ConnectorManager } from '@/lib/canvas/connectors';
 import { debounce } from '@/lib/utils/debounce';
+import { getTopElementAtPoint, getElementsInSelectionBox, hitTestElement } from '@/lib/canvas/hit-test';
 type InteractionMode =
   | 'idle'
   | 'panning'
@@ -23,7 +25,9 @@ type InteractionMode =
   | 'resizing'
   | 'rotating'
   | 'text-editing'
-  | 'erasing';
+  | 'erasing'
+  | 'connector-draw'
+  | 'connector-reshaping';
 
 
 export function Canvas() {
@@ -57,8 +61,6 @@ export function Canvas() {
   const lastPointerWorldPos = useRef<Point | null>(null); // world coords for sweep testing
   const spatialIndexRef = useRef<SpatialIndex>(new SpatialIndex());
   const eraserRef = useRef<EraserManager | null>(null);
-  const eraseDirty = useRef(false);
-  const eraseAccumulated = useRef<{ toDelete: string[], toAdd: WhiteboardElement[] }>({ toDelete: [], toAdd: [] });
   const dragStartElementPositions = useRef<Record<string, Point>>({});
   const resizeHandleRef = useRef<ResizeHandle | null>(null);
   const resizeStartBounds = useRef<{ x: number; y: number; width: number; height: number } | null>(null);
@@ -66,17 +68,64 @@ export function Canvas() {
   const rotateStartAngle = useRef<number>(0);
   const rotateCenter = useRef<Point>({ x: 0, y: 0 });
   const rotateElementIdRef = useRef<string | null>(null);
+  const connectorHandleIndexRef = useRef<number | null>(null);
 
   // Initialize EraserManager
   useEffect(() => {
     eraserRef.current = new EraserManager(spatialIndexRef.current);
   }, []);
 
-  // Keep spatial index up to date (debounced)
+  // Keyboard shortcuts
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      // Skip if a text input is focused
+      const tag = (e.target as HTMLElement)?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+
+      switch (e.key) {
+        case 'Escape':
+          // Deselect all and return to select tool
+          clearSelection();
+          setTool('select');
+          break;
+
+        case 'Delete':
+        case 'Backspace': {
+          // Delete selected elements
+          const ids = Array.from(useCanvasStore.getState().selectedIds);
+          if (ids.length > 0) {
+            saveSnapshot();
+            deleteElements(ids);
+          }
+          break;
+        }
+
+        case 'v':
+        case 'V':
+          if (!e.metaKey && !e.ctrlKey) {
+            setTool('select');
+          }
+          break;
+
+        case 'a':
+        case 'A':
+          if (e.metaKey || e.ctrlKey) {
+            e.preventDefault();
+            useCanvasStore.getState().selectAll();
+          }
+          break;
+      }
+    };
+
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [clearSelection, setTool, deleteElements, saveSnapshot]);
+
+  // Keep spatial index up to date (debounced for non-eraser updates)
   const debouncedUpdateIndex = useCallback(
     debounce((els: Record<string, WhiteboardElement>) => {
       spatialIndexRef.current.rebuild(els);
-    }, 100),
+    }, 200),
     []
   );
 
@@ -122,27 +171,41 @@ export function Canvas() {
         grid
       );
 
-      // Draw rubber-band selection rectangle
+      // Draw rubber-band selection rectangle (Excalidraw style)
       if (selectionBox && modeRef.current === 'selecting') {
         const ctx = canvasRef.current!.getContext('2d');
         if (ctx) {
           ctx.save();
           ctx.translate(viewport.x, viewport.y);
           ctx.scale(viewport.zoom, viewport.zoom);
-          ctx.fillStyle = 'rgba(0, 0, 0, 0.06)';
-          ctx.strokeStyle = 'rgba(0, 0, 0, 0.5)';
-          ctx.lineWidth = 1 / viewport.zoom;
 
           const x = Math.min(selectionBox.start.x, selectionBox.end.x);
           const y = Math.min(selectionBox.start.y, selectionBox.end.y);
           const w = Math.abs(selectionBox.end.x - selectionBox.start.x);
           const h = Math.abs(selectionBox.end.y - selectionBox.start.y);
 
+          // Left→Right = contain mode (solid blue), Right→Left = crossing mode (dashed purple)
+          const isCrossing = selectionBox.end.x < selectionBox.start.x;
+
+          if (isCrossing) {
+            // Crossing / intersect mode — dashed purple (like AutoCAD crossing selection)
+            ctx.fillStyle = 'rgba(100, 80, 200, 0.07)';
+            ctx.strokeStyle = 'rgba(120, 80, 220, 0.8)';
+            ctx.setLineDash([6 / viewport.zoom, 3 / viewport.zoom]);
+          } else {
+            // Contain mode — solid blue
+            ctx.fillStyle = 'rgba(30, 100, 255, 0.07)';
+            ctx.strokeStyle = 'rgba(30, 100, 255, 0.8)';
+            ctx.setLineDash([]);
+          }
+
+          ctx.lineWidth = 1.5 / viewport.zoom;
           ctx.fillRect(x, y, w, h);
           ctx.strokeRect(x, y, w, h);
           ctx.restore();
         }
       }
+
 
       frameId = requestAnimationFrame(render);
     };
@@ -229,9 +292,14 @@ export function Canvas() {
     // Eraser tool
     if (tool === 'eraser') {
       saveSnapshot();
+      
+      // CRITICAL: Rebuild spatial index synchronously right now so all
+      // elements drawn since last debounce tick are included.
+      spatialIndexRef.current.rebuild(useCanvasStore.getState().elements);
+      
       eraserRef.current?.startErase(world);
       
-      // Perform initial erase
+      // Perform initial erase at the click point
       if (eraserRef.current) {
         const { toDelete, toAdd } = eraserRef.current.erase(
           world,
@@ -241,17 +309,7 @@ export function Canvas() {
         );
         
         if (toDelete.length > 0 || toAdd.length > 0) {
-          eraseAccumulated.current.toDelete.push(...toDelete);
-          eraseAccumulated.current.toAdd.push(...toAdd);
-          
-          if (!eraseDirty.current) {
-            eraseDirty.current = true;
-            requestAnimationFrame(() => {
-              batchErase(eraseAccumulated.current.toDelete, eraseAccumulated.current.toAdd);
-              eraseAccumulated.current = { toDelete: [], toAdd: [] };
-              eraseDirty.current = false;
-            });
-          }
+          batchErase(toDelete, toAdd);
         }
       }
       
@@ -263,64 +321,103 @@ export function Canvas() {
     if (tool === 'select') {
       const selectedArray = getSelectedElements();
 
-      // Check resize handle first
-      if (selectedArray.length >= 1) {
+      // ── 1. Check resize / rotate handles on currently selected element ──────
+      if (selectedArray.length === 1) {
         const el = selectedArray[0]!;
-        const handle = getHandleAtPoint(world, el, viewport.zoom);
-        if (handle) {
-          if (handle === ResizeHandle.ROTATION) {
-            // Rotate
-            const cx = el.x + el.width / 2;
-            const cy = el.y + el.height / 2;
-            rotateCenter.current = { x: cx, y: cy };
-            rotateStartAngle.current = Math.atan2(world.y - cy, world.x - cx) - (el.rotation || 0);
-            rotateElementIdRef.current = el.id;
-            setMode('rotating');
-          } else {
-            // Resize
-            resizeHandleRef.current = handle;
-            resizeStartBounds.current = { x: el.x, y: el.y, width: el.width, height: el.height };
+
+        if (el.type === ShapeType.CONNECTOR) {
+          const manager = new ConnectorManager();
+          const conn = el as ConnectorElement;
+          const handleRad = 10 / viewport.zoom;
+          const dist = (p1: Point, p2: Point) => Math.hypot(p1.x - p2.x, p1.y - p2.y);
+
+          const mid = manager.getPointOnCurve(0.5, conn.startX, conn.startY, conn.endX, conn.endY, conn.controlPoints);
+          if (dist(world, mid) < handleRad) {
+            connectorHandleIndexRef.current = -1;
             resizeElementIdRef.current = el.id;
-            setMode('resizing');
+            setMode('connector-reshaping');
+            return;
           }
-          return;
+
+          if (conn.isManuallyRouted && conn.controlPoints) {
+            if (conn.controlPoints[0] && dist(world, conn.controlPoints[0]) < handleRad) {
+              connectorHandleIndexRef.current = 0;
+              resizeElementIdRef.current = el.id;
+              setMode('connector-reshaping');
+              return;
+            }
+            if (conn.controlPoints[1] && dist(world, conn.controlPoints[1]) < handleRad) {
+              connectorHandleIndexRef.current = 1;
+              resizeElementIdRef.current = el.id;
+              setMode('connector-reshaping');
+              return;
+            }
+          }
+        } else {
+          const handle = getHandleAtPoint(world, el, viewport.zoom);
+          if (handle) {
+            if (handle === ResizeHandle.ROTATION) {
+              const cx = el.x + el.width / 2;
+              const cy = el.y + el.height / 2;
+              rotateCenter.current = { x: cx, y: cy };
+              rotateStartAngle.current = Math.atan2(world.y - cy, world.x - cx) - (el.rotation || 0);
+              rotateElementIdRef.current = el.id;
+              setMode('rotating');
+            } else {
+              resizeHandleRef.current = handle;
+              resizeStartBounds.current = { x: el.x, y: el.y, width: el.width, height: el.height };
+              resizeElementIdRef.current = el.id;
+              setMode('resizing');
+            }
+            return;
+          }
         }
       }
 
-      // Hit test elements
-      const sortedEls = Object.values(elements).sort((a, b) => b.zIndex - a.zIndex);
-      let hitId: string | null = null;
-      for (const el of sortedEls) {
-        const box = { minX: el.x, minY: el.y, maxX: el.x + el.width, maxY: el.y + el.height };
-        if (isPointInBox(world, box)) { hitId = el.id; break; }
-      }
+      // ── 2. Hit test: find topmost element at click point ─────────────────
+      const hitEl = getTopElementAtPoint(elements, world, viewport.zoom);
+      const hitId = hitEl?.id ?? null;
 
       if (hitId) {
         if (e.shiftKey) {
+          // Shift-click: toggle element in selection
           const newSet = new Set(selectedIds);
-          if (newSet.has(hitId)) newSet.delete(hitId);
-          else newSet.add(hitId);
+          if (newSet.has(hitId)) {
+            newSet.delete(hitId);
+          } else {
+            newSet.add(hitId);
+          }
           selectElements(Array.from(newSet));
+          // Setup drag for the full new selection
+          dragStartElementPositions.current = {};
+          Array.from(newSet).forEach(id => {
+            const el = elements[id];
+            if (el) dragStartElementPositions.current[id] = { x: el.x, y: el.y };
+          });
         } else {
-          if (!selectedIds.has(hitId)) selectElements([hitId]);
-        }
-
-        // Set up for drag-move
-        const newSelected = e.shiftKey ? [] : [hitId];
-        const toDrag = newSelected.length ? newSelected : Array.from(selectedIds.has(hitId) ? selectedIds : new Set([hitId]));
-        dragStartElementPositions.current = {};
-        toDrag.forEach(id => {
-          const el = elements[id];
-          if (el) dragStartElementPositions.current[id] = { x: el.x, y: el.y };
-        });
-        // Also include hitId if not in selection yet
-        if (!dragStartElementPositions.current[hitId]) {
-          const el = elements[hitId];
-          if (el) dragStartElementPositions.current[hitId] = { x: el.x, y: el.y };
+          // Normal click
+          if (!selectedIds.has(hitId)) {
+            // Select just this element
+            selectElements([hitId]);
+          }
+          // Setup drag for all currently-selected elements (or just the new one)
+          const toDrag = selectedIds.has(hitId) && selectedIds.size > 1
+            ? Array.from(selectedIds)
+            : [hitId];
+          dragStartElementPositions.current = {};
+          toDrag.forEach(id => {
+            const el = elements[id];
+            if (el) dragStartElementPositions.current[id] = { x: el.x, y: el.y };
+          });
+          if (!dragStartElementPositions.current[hitId]) {
+            const el = elements[hitId];
+            if (el) dragStartElementPositions.current[hitId] = { x: el.x, y: el.y };
+          }
         }
         setMode('dragging');
       } else {
-        clearSelection();
+        // ── 3. Click on empty canvas: start rubber-band selection ───────────
+        if (!e.shiftKey) clearSelection();
         setSelectionBox({ start: world, end: world });
         setMode('selecting');
       }
@@ -347,6 +444,40 @@ export function Canvas() {
       selectElements([id]);
       currentElementRef.current = newEl;
       setMode('freehand');
+      return;
+    }
+
+    // Connector drawing
+    if (tool === ShapeType.CONNECTOR || tool === ShapeType.ARROW) {
+      const id = uuidv4();
+      const manager = new ConnectorManager();
+      const nearest = manager.findNearestAnchor(world.x, world.y, elements);
+      
+      const newConnector: ConnectorElement = {
+        id,
+        type: ShapeType.CONNECTOR,
+        x: world.x,
+        y: world.y,
+        width: 0,
+        height: 0,
+        rotation: 0,
+        locked: false,
+        zIndex: Date.now(),
+        style: { ...currentStyle },
+        seed: Math.floor(Math.random() * 100000),
+        startX: nearest ? nearest.x : world.x,
+        startY: nearest ? nearest.y : world.y,
+        endX: world.x,
+        endY: world.y,
+        startElementId: nearest ? nearest.elementId : null,
+        startAnchorPoint: nearest ? nearest.position : undefined,
+        routingMode: 'curved'
+      };
+      
+      addElement(newConnector as unknown as WhiteboardElement);
+      selectElements([id]);
+      currentElementRef.current = newConnector as unknown as WhiteboardElement;
+      setMode('connector-draw');
       return;
     }
 
@@ -388,16 +519,12 @@ export function Canvas() {
       case 'selecting': {
         if (selectionBox) {
           setSelectionBox(prev => prev ? { ...prev, end: world } : null);
-          // Select elements within rubber band
-          const minX = Math.min(selectionBox.start.x, world.x);
-          const minY = Math.min(selectionBox.start.y, world.y);
-          const maxX = Math.max(selectionBox.start.x, world.x);
-          const maxY = Math.max(selectionBox.start.y, world.y);
-          const inBox = Object.values(elements)
-            .filter(el => el.x < maxX && el.x + el.width > minX && el.y < maxY && el.y + el.height > minY)
-            .map(el => el.id);
+          // Excalidraw-style rubber-band:
+          // Left→Right drag = contain mode (element fully inside)
+          // Right→Left drag = crossing mode (element just needs to intersect)
+          const inBox = getElementsInSelectionBox(elements, selectionBox.start, world);
           if (inBox.length > 0) selectElements(inBox);
-          else clearSelection();
+          else if (!selectionBox.start || Math.hypot(world.x - selectionBox.start.x, world.y - selectionBox.start.y) > 4 / viewport.zoom) clearSelection();
         }
         break;
       }
@@ -410,10 +537,18 @@ export function Canvas() {
         Object.keys(dragStartElementPositions.current).forEach((id) => {
           const el = freshElements[id];
           if (el) updateElement(id, { x: el.x + wdx, y: el.y + wdy });
-          // Keep our start positions in sync so we can call saveSnapshot later
-          if (dragStartElementPositions.current[id]) {
-            // no-op: we track start for the snapshot
-          }
+          // Trigger connector updates
+          useCanvasStore.getState().updateAttachedConnectors(id, (conn, els) => {
+            const manager = new ConnectorManager();
+            manager.computeConnectorPath(conn, els);
+            useCanvasStore.getState().updateElement(conn.id, {
+               startX: conn.startX,
+               startY: conn.startY,
+               endX: conn.endX,
+               endY: conn.endY,
+               controlPoints: conn.controlPoints
+            });
+          });
         });
         break;
       }
@@ -479,6 +614,54 @@ export function Canvas() {
         break;
       }
 
+      case 'connector-draw': {
+        if (!currentElementRef.current) break;
+        const el = currentElementRef.current as ConnectorElement;
+        const manager = new ConnectorManager();
+        const nearest = manager.findNearestAnchor(world.x, world.y, useCanvasStore.getState().elements, el.id);
+        
+        const updates: Partial<ConnectorElement> = {
+          endX: nearest ? nearest.x : world.x,
+          endY: nearest ? nearest.y : world.y,
+          endElementId: nearest ? nearest.elementId : null,
+          endAnchorPoint: nearest ? nearest.position : undefined,
+        };
+
+        const tempConn = { ...el, ...updates } as ConnectorElement;
+        manager.computeConnectorPath(tempConn, useCanvasStore.getState().elements);
+        updates.controlPoints = tempConn.controlPoints;
+
+        updateElement(el.id, updates);
+        currentElementRef.current = tempConn as unknown as WhiteboardElement;
+        break;
+      }
+
+      case 'connector-reshaping': {
+        const elId = resizeElementIdRef.current;
+        const hIdx = connectorHandleIndexRef.current;
+        if (!elId || hIdx === null) break;
+        
+        const el = useCanvasStore.getState().elements[elId] as ConnectorElement;
+        if (!el) break;
+        
+        const wdx = world.x - lastPointerWorldPos.current!.x;
+        const wdy = world.y - lastPointerWorldPos.current!.y;
+        
+        const newCp = el.controlPoints ? [...el.controlPoints] : [];
+        if (hIdx === -1) {
+           // Move both control points if midpoint
+           if (newCp[0]) { newCp[0].x += wdx; newCp[0].y += wdy; }
+           if (newCp[1]) { newCp[1].x += wdx; newCp[1].y += wdy; }
+        } else if (hIdx === 0 && newCp[0]) {
+           newCp[0].x += wdx; newCp[0].y += wdy;
+        } else if (hIdx === 1 && newCp[1]) {
+           newCp[1].x += wdx; newCp[1].y += wdy;
+        }
+        
+        updateElement(elId, { controlPoints: newCp, isManuallyRouted: true });
+        break;
+      }
+
       case 'erasing': {
         if (eraserRef.current) {
           const { toDelete, toAdd } = eraserRef.current.erase(
@@ -489,19 +672,8 @@ export function Canvas() {
           );
           
           if (toDelete.length > 0 || toAdd.length > 0) {
-            eraseAccumulated.current.toDelete.push(...toDelete);
-            eraseAccumulated.current.toAdd.push(...toAdd);
-            
-            // Note: spatial index will be updated optimistically via debounce
-            
-            if (!eraseDirty.current) {
-              eraseDirty.current = true;
-              requestAnimationFrame(() => {
-                batchErase(eraseAccumulated.current.toDelete, eraseAccumulated.current.toAdd);
-                eraseAccumulated.current = { toDelete: [], toAdd: [] };
-                eraseDirty.current = false;
-              });
-            }
+            // Apply immediately — spatial index is already updated inside EraserManager
+            batchErase(toDelete, toAdd);
           }
         }
         break;
@@ -539,6 +711,13 @@ export function Canvas() {
         }
       }
       currentElementRef.current = null;
+    }
+
+    if (prevMode === 'connector-draw' || prevMode === 'connector-reshaping') {
+      saveSnapshot();
+      currentElementRef.current = null;
+      resizeElementIdRef.current = null;
+      connectorHandleIndexRef.current = null;
     }
 
     if (prevMode === 'dragging') {
@@ -622,6 +801,21 @@ export function Canvas() {
   const handleDoubleClick = (e: React.MouseEvent) => {
     if (tool === 'select') {
       const world = screenToWorld(e.clientX, e.clientY);
+      const selectedArray = getSelectedElements();
+      
+      if (selectedArray.length === 1 && selectedArray[0].type === ShapeType.CONNECTOR) {
+         const conn = selectedArray[0] as ConnectorElement;
+         const manager = new ConnectorManager();
+         const mid = manager.getPointOnCurve(0.5, conn.startX, conn.startY, conn.endX, conn.endY, conn.controlPoints);
+         if (Math.hypot(world.x - mid.x, world.y - mid.y) < 8 / viewport.zoom) {
+            useCanvasStore.getState().setConnectorRoutingMode(conn.id, conn.routingMode || 'curved');
+            manager.computeConnectorPath(conn, elements);
+            updateElement(conn.id, { controlPoints: conn.controlPoints });
+            saveSnapshot();
+            return;
+         }
+      }
+
       const sortedEls = Object.values(elements).sort((a, b) => b.zIndex - a.zIndex);
       for (const el of sortedEls) {
         const box = { minX: el.x, minY: el.y, maxX: el.x + el.width, maxY: el.y + el.height };

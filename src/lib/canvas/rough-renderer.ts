@@ -11,7 +11,7 @@ export interface RoughOptions {
 }
 
 export class RoughRenderer {
-  private rc: RoughCanvas;
+  public rc: RoughCanvas;
   
   constructor(canvas: HTMLCanvasElement) {
     this.rc = rough.canvas(canvas);

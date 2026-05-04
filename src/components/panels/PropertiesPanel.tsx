@@ -12,7 +12,7 @@ import {
 import { useCanvasStore } from '@/store/canvas-store';
 import { useUIStore } from '@/store/ui-store';
 import { ColorPicker } from '../toolbar/ColorPicker';
-import { WhiteboardElement, ShapeType } from '@/types';
+import { WhiteboardElement, ShapeType, ConnectorElement } from '@/types';
 
 export function PropertiesPanel() {
   const elements = useCanvasStore(state => state.elements);
@@ -197,6 +197,28 @@ export function PropertiesPanel() {
               ))}
             </div>
           </div>
+
+          {/* Connector Routing Mode */}
+          {element.type === ShapeType.CONNECTOR && (
+            <div className="flex flex-col gap-1">
+              <span className="text-[10px] text-zinc-500 dark:text-zinc-400">Routing Mode</span>
+              <div className="flex gap-2">
+                {(['straight', 'curved', 'orthogonal'] as const).map(mode => (
+                  <button
+                    key={mode}
+                    onClick={() => useCanvasStore.getState().setConnectorRoutingMode(element.id, mode)}
+                    className={`px-2 py-1 text-[10px] rounded border capitalize flex-1 ${
+                      (element as ConnectorElement).routingMode === mode
+                        ? 'border-foreground bg-foreground text-background font-medium'
+                        : 'border-zinc-300 dark:border-zinc-700 text-zinc-500 hover:border-zinc-500'
+                    }`}
+                  >
+                    {mode}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
 
         {/* Arrange */}
