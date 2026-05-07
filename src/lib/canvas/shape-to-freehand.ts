@@ -1,4 +1,4 @@
-import { ShapeElement, ShapeType, FreehandElement, Point } from '@/types';
+import { ShapeElement, ShapeType, FreehandElement } from '@/types';
 import { v4 as uuidv4 } from 'uuid';
 
 /**

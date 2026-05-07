@@ -1,0 +1,9 @@
+.kiro/
+.cursor/
+.claude/
+.code-review-graph/
+.cursorrules
+.windsurfrules
+*.md
+refactor.js
+refactor_bugfix.js

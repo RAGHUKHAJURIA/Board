@@ -90,6 +90,10 @@ export interface ConnectorElement extends BaseElement {
   curved?: boolean; // Deprecated, use routingMode
   label?: string;
   seed: number;
+  startBindingGap?: number;
+  endBindingGap?: number;
+  startOffsetFromCenter?: { x: number; y: number };
+  endOffsetFromCenter?: { x: number; y: number };
 }
 
 export type WhiteboardElement = ShapeElement | FreehandElement | TextElement | ImageElement | ConnectorElement;

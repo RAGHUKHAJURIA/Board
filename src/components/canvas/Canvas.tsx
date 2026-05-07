@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useEffect, useRef, useState, useCallback } from 'react';
+import React, { useEffect, useRef, useState, useCallback, useMemo } from 'react';
 import { useCanvasStore } from '@/store/canvas-store';
 import { useUIStore } from '@/store/ui-store';
 import { renderCanvas } from '@/lib/canvas/renderer';
@@ -14,7 +14,8 @@ import { SpatialIndex } from '@/lib/canvas/spatial-index';
 import { EraserManager } from '@/lib/canvas/eraser-manager';
 import { ConnectorManager } from '@/lib/canvas/connectors';
 import { debounce } from '@/lib/utils/debounce';
-import { getTopElementAtPoint, getElementsInSelectionBox, hitTestElement } from '@/lib/canvas/hit-test';
+import { getTopElementAtPoint, getElementsInSelectionBox } from '@/lib/canvas/hit-test';
+import { buildConnectionGraph, findConnectedComponent } from '@/lib/canvas/connected-components';
 type InteractionMode =
   | 'idle'
   | 'panning'
@@ -27,7 +28,8 @@ type InteractionMode =
   | 'text-editing'
   | 'erasing'
   | 'connector-draw'
-  | 'connector-reshaping';
+  | 'connector-reshaping'
+  | 'connector-endpoint-drag';
 
 
 export function Canvas() {
@@ -69,6 +71,7 @@ export function Canvas() {
   const rotateCenter = useRef<Point>({ x: 0, y: 0 });
   const rotateElementIdRef = useRef<string | null>(null);
   const connectorHandleIndexRef = useRef<number | null>(null);
+  const connectorEndpointRef = useRef<'start' | 'end' | null>(null);
 
   // Initialize EraserManager
   useEffect(() => {
@@ -122,8 +125,8 @@ export function Canvas() {
   }, [clearSelection, setTool, deleteElements, saveSnapshot]);
 
   // Keep spatial index up to date (debounced for non-eraser updates)
-  const debouncedUpdateIndex = useCallback(
-    debounce((els: Record<string, WhiteboardElement>) => {
+  const debouncedUpdateIndex = useMemo(
+    () => debounce((els: Record<string, WhiteboardElement>) => {
       spatialIndexRef.current.rebuild(els);
     }, 200),
     []
@@ -203,6 +206,38 @@ export function Canvas() {
           ctx.fillRect(x, y, w, h);
           ctx.strokeRect(x, y, w, h);
           ctx.restore();
+        }
+      }
+
+      // Draw binding highlight
+      const hoveredBindTarget = useCanvasStore.getState().hoveredBindTarget;
+      if (hoveredBindTarget) {
+        const el = elements[hoveredBindTarget];
+        if (el) {
+          const ctx = canvasRef.current!.getContext('2d');
+          if (ctx) {
+            ctx.save();
+            ctx.translate(viewport.x, viewport.y);
+            ctx.scale(viewport.zoom, viewport.zoom);
+            ctx.fillStyle = 'rgba(59, 130, 246, 0.15)';
+            ctx.strokeStyle = '#3b82f6';
+            ctx.lineWidth = 2 / viewport.zoom;
+            ctx.fillRect(el.x - 4, el.y - 4, el.width + 8, el.height + 8);
+            ctx.strokeRect(el.x - 4, el.y - 4, el.width + 8, el.height + 8);
+            
+            // Draw small anchor dots
+            const manager = new ConnectorManager();
+            const anchors = manager.getAnchorPoints(el);
+            ctx.fillStyle = '#ffffff';
+            for (const [key, pos] of Object.entries(anchors)) {
+              if (key === 'center') continue;
+              ctx.beginPath();
+              ctx.arc(pos.x, pos.y, 4 / viewport.zoom, 0, Math.PI * 2);
+              ctx.fill();
+              ctx.stroke();
+            }
+            ctx.restore();
+          }
         }
       }
 
@@ -328,10 +363,25 @@ export function Canvas() {
         if (el.type === ShapeType.CONNECTOR) {
           const manager = new ConnectorManager();
           const conn = el as ConnectorElement;
-          const handleRad = 10 / viewport.zoom;
+          const handleRad = 12 / viewport.zoom;
           const dist = (p1: Point, p2: Point) => Math.hypot(p1.x - p2.x, p1.y - p2.y);
 
-          const mid = manager.getPointOnCurve(0.5, conn.startX, conn.startY, conn.endX, conn.endY, conn.controlPoints);
+          const resolved = manager.resolveConnectorEndpoints(conn, useCanvasStore.getState().getElementsMap());
+
+          if (dist(world, { x: resolved.endX, y: resolved.endY }) < handleRad) {
+            connectorEndpointRef.current = 'end';
+            resizeElementIdRef.current = el.id;
+            setMode('connector-endpoint-drag');
+            return;
+          }
+          if (dist(world, { x: resolved.startX, y: resolved.startY }) < handleRad) {
+            connectorEndpointRef.current = 'start';
+            resizeElementIdRef.current = el.id;
+            setMode('connector-endpoint-drag');
+            return;
+          }
+
+          const mid = manager.getPointOnCurve(0.5, resolved.startX, resolved.startY, resolved.endX, resolved.endY, conn.controlPoints);
           if (dist(world, mid) < handleRad) {
             connectorHandleIndexRef.current = -1;
             resizeElementIdRef.current = el.id;
@@ -379,15 +429,46 @@ export function Canvas() {
       const hitId = hitEl?.id ?? null;
 
       if (hitId) {
+        const hitElement = elements[hitId];
+        if (hitElement && hitElement.type === ShapeType.CONNECTOR) {
+          const manager = new ConnectorManager();
+          const conn = hitElement as ConnectorElement;
+          const handleRad = 15 / viewport.zoom;
+          const dist = (p1: Point, p2: Point) => Math.hypot(p1.x - p2.x, p1.y - p2.y);
+          const resolved = manager.resolveConnectorEndpoints(conn, useCanvasStore.getState().getElementsMap());
+
+          if (dist(world, { x: resolved.endX, y: resolved.endY }) < handleRad) {
+            if (!selectedIds.has(hitId)) selectElements([hitId]);
+            connectorEndpointRef.current = 'end';
+            resizeElementIdRef.current = hitId;
+            setMode('connector-endpoint-drag');
+            return;
+          }
+          if (dist(world, { x: resolved.startX, y: resolved.startY }) < handleRad) {
+            if (!selectedIds.has(hitId)) selectElements([hitId]);
+            connectorEndpointRef.current = 'start';
+            resizeElementIdRef.current = hitId;
+            setMode('connector-endpoint-drag');
+            return;
+          }
+        }
+
+        const graph = buildConnectionGraph(elements);
+        const componentIds = findConnectedComponent(hitId, graph);
+
         if (e.shiftKey) {
-          // Shift-click: toggle element in selection
+          // Shift-click: toggle element and its component in selection
           const newSet = new Set(selectedIds);
-          if (newSet.has(hitId)) {
-            newSet.delete(hitId);
+          let allSelected = true;
+          componentIds.forEach(id => { if (!newSet.has(id)) allSelected = false; });
+          
+          if (allSelected) {
+            componentIds.forEach(id => newSet.delete(id));
           } else {
-            newSet.add(hitId);
+            componentIds.forEach(id => newSet.add(id));
           }
           selectElements(Array.from(newSet));
+          
           // Setup drag for the full new selection
           dragStartElementPositions.current = {};
           Array.from(newSet).forEach(id => {
@@ -397,21 +478,22 @@ export function Canvas() {
         } else {
           // Normal click
           if (!selectedIds.has(hitId)) {
-            // Select just this element
-            selectElements([hitId]);
-          }
-          // Setup drag for all currently-selected elements (or just the new one)
-          const toDrag = selectedIds.has(hitId) && selectedIds.size > 1
-            ? Array.from(selectedIds)
-            : [hitId];
-          dragStartElementPositions.current = {};
-          toDrag.forEach(id => {
-            const el = elements[id];
-            if (el) dragStartElementPositions.current[id] = { x: el.x, y: el.y };
-          });
-          if (!dragStartElementPositions.current[hitId]) {
-            const el = elements[hitId];
-            if (el) dragStartElementPositions.current[hitId] = { x: el.x, y: el.y };
+            // Select this entire connected component
+            selectElements(Array.from(componentIds));
+            
+            // Setup drag for the newly selected component
+            dragStartElementPositions.current = {};
+            componentIds.forEach(id => {
+              const el = elements[id];
+              if (el) dragStartElementPositions.current[id] = { x: el.x, y: el.y };
+            });
+          } else {
+            // Already selected, prep all selected for dragging
+            dragStartElementPositions.current = {};
+            selectedIds.forEach(id => {
+              const el = elements[id];
+              if (el) dragStartElementPositions.current[id] = { x: el.x, y: el.y };
+            });
           }
         }
         setMode('dragging');
@@ -465,12 +547,12 @@ export function Canvas() {
         zIndex: Date.now(),
         style: { ...currentStyle },
         seed: Math.floor(Math.random() * 100000),
-        startX: nearest ? nearest.x : world.x,
-        startY: nearest ? nearest.y : world.y,
+        startX: nearest ? nearest.position.x : world.x,
+        startY: nearest ? nearest.position.y : world.y,
         endX: world.x,
         endY: world.y,
         startElementId: nearest ? nearest.elementId : null,
-        startAnchorPoint: nearest ? nearest.position : undefined,
+        startAnchorPoint: nearest ? nearest.anchorPoint : undefined,
         routingMode: 'curved'
       };
       
@@ -534,22 +616,13 @@ export function Canvas() {
         const wdy = world.y - screenToWorld(lastPointerPos.current.x, lastPointerPos.current.y).y;
         // Move all selected elements
         const freshElements = useCanvasStore.getState().elements;
-        Object.keys(dragStartElementPositions.current).forEach((id) => {
+        const movedIds = Object.keys(dragStartElementPositions.current);
+        movedIds.forEach((id) => {
           const el = freshElements[id];
           if (el) updateElement(id, { x: el.x + wdx, y: el.y + wdy });
-          // Trigger connector updates
-          useCanvasStore.getState().updateAttachedConnectors(id, (conn, els) => {
-            const manager = new ConnectorManager();
-            manager.computeConnectorPath(conn, els);
-            useCanvasStore.getState().updateElement(conn.id, {
-               startX: conn.startX,
-               startY: conn.startY,
-               endX: conn.endX,
-               endY: conn.endY,
-               controlPoints: conn.controlPoints
-            });
-          });
         });
+        // Trigger connector updates for all moved elements at once
+        useCanvasStore.getState().updateAttachedConnectors(movedIds, useCanvasStore.getState().getElementsMap());
         break;
       }
 
@@ -618,21 +691,61 @@ export function Canvas() {
         if (!currentElementRef.current) break;
         const el = currentElementRef.current as ConnectorElement;
         const manager = new ConnectorManager();
-        const nearest = manager.findNearestAnchor(world.x, world.y, useCanvasStore.getState().elements, el.id);
+        const nearest = manager.findNearestAnchor(world.x, world.y, useCanvasStore.getState().elements, el.startElementId || undefined);
+        useCanvasStore.getState().setHoveredBindTarget(nearest ? nearest.elementId : null);
         
         const updates: Partial<ConnectorElement> = {
-          endX: nearest ? nearest.x : world.x,
-          endY: nearest ? nearest.y : world.y,
+          endX: nearest ? nearest.position.x : world.x,
+          endY: nearest ? nearest.position.y : world.y,
           endElementId: nearest ? nearest.elementId : null,
-          endAnchorPoint: nearest ? nearest.position : undefined,
+          endAnchorPoint: nearest ? nearest.anchorPoint : undefined,
         };
 
         const tempConn = { ...el, ...updates } as ConnectorElement;
-        manager.computeConnectorPath(tempConn, useCanvasStore.getState().elements);
+        manager.computeConnectorPath(tempConn, useCanvasStore.getState().getElementsMap());
         updates.controlPoints = tempConn.controlPoints;
 
         updateElement(el.id, updates);
         currentElementRef.current = tempConn as unknown as WhiteboardElement;
+        break;
+      }
+
+      case 'connector-endpoint-drag': {
+        const elId = resizeElementIdRef.current;
+        const endpoint = connectorEndpointRef.current;
+        if (!elId || !endpoint) break;
+        
+        const store = useCanvasStore.getState();
+        const connector = store.getElement(elId) as ConnectorElement;
+        if (!connector) break;
+
+        const manager = new ConnectorManager();
+        const excludeId = endpoint === 'end' ? connector.startElementId ?? undefined : connector.endElementId ?? undefined;
+        const anchorHit = manager.findNearestAnchor(world.x, world.y, store.elements, excludeId);
+
+        store.setHoveredBindTarget(anchorHit?.elementId ?? null);
+
+        const updates: Partial<ConnectorElement> = {
+          isManuallyRouted: false,
+        };
+        
+        if (endpoint === 'end') {
+          updates.endX = anchorHit ? anchorHit.position.x : world.x;
+          updates.endY = anchorHit ? anchorHit.position.y : world.y;
+          updates.endElementId = anchorHit?.elementId ?? null;
+          updates.endAnchorPoint = anchorHit?.anchorPoint ?? undefined;
+        } else {
+          updates.startX = anchorHit ? anchorHit.position.x : world.x;
+          updates.startY = anchorHit ? anchorHit.position.y : world.y;
+          updates.startElementId = anchorHit?.elementId ?? null;
+          updates.startAnchorPoint = anchorHit?.anchorPoint ?? undefined;
+        }
+
+        const tempConn = { ...connector, ...updates } as ConnectorElement;
+        const path = manager.computeConnectorPath(tempConn, store.getElementsMap());
+        updates.controlPoints = path.controlPoints;
+
+        updateElement(elId, updates);
         break;
       }
 
@@ -713,11 +826,55 @@ export function Canvas() {
       currentElementRef.current = null;
     }
 
-    if (prevMode === 'connector-draw' || prevMode === 'connector-reshaping') {
+    if (prevMode === 'connector-draw') {
+      useCanvasStore.getState().setHoveredBindTarget(null);
+      const el = currentElementRef.current as ConnectorElement;
+      if (el && Math.hypot(el.endX - el.startX, el.endY - el.startY) < 5) {
+        deleteElements([el.id]);
+        clearSelection();
+      }
       saveSnapshot();
       currentElementRef.current = null;
       resizeElementIdRef.current = null;
       connectorHandleIndexRef.current = null;
+    } else if (prevMode === 'connector-reshaping') {
+      saveSnapshot();
+      currentElementRef.current = null;
+      resizeElementIdRef.current = null;
+      connectorHandleIndexRef.current = null;
+    } else if (prevMode === 'connector-endpoint-drag') {
+      const store = useCanvasStore.getState();
+      const elId = resizeElementIdRef.current;
+      const endpoint = connectorEndpointRef.current;
+      
+      if (elId && endpoint) {
+        const connector = store.getElement(elId) as ConnectorElement;
+        if (connector) {
+          const manager = new ConnectorManager();
+          const excludeId = endpoint === 'end' ? connector.startElementId ?? undefined : connector.endElementId ?? undefined;
+          const worldPos = lastPointerWorldPos.current!;
+          const anchorHit = manager.findNearestAnchor(worldPos.x, worldPos.y, store.elements, excludeId);
+          
+          const updates: Partial<ConnectorElement> = {};
+          if (endpoint === 'end') {
+            updates.endX = anchorHit ? anchorHit.position.x : worldPos.x;
+            updates.endY = anchorHit ? anchorHit.position.y : worldPos.y;
+            updates.endElementId = anchorHit?.elementId ?? null;
+            updates.endAnchorPoint = anchorHit?.anchorPoint ?? undefined;
+          } else {
+            updates.startX = anchorHit ? anchorHit.position.x : worldPos.x;
+            updates.startY = anchorHit ? anchorHit.position.y : worldPos.y;
+            updates.startElementId = anchorHit?.elementId ?? null;
+            updates.startAnchorPoint = anchorHit?.anchorPoint ?? undefined;
+          }
+          store.updateElement(elId, updates);
+        }
+      }
+      
+      store.setHoveredBindTarget(null);
+      saveSnapshot();
+      resizeElementIdRef.current = null;
+      connectorEndpointRef.current = null;
     }
 
     if (prevMode === 'dragging') {

@@ -36,6 +36,7 @@ export const renderCanvas = (
   // Using imported RoughRenderer to draw connectors
   const roughRenderer = new RoughRenderer(canvas);
   const connectorManager = new ConnectorManager();
+  const elementsMap = new Map(elements.map(e => [e.id, e]));
 
   // Render Elements
   sortedElements.forEach((element) => {
@@ -76,7 +77,7 @@ export const renderCanvas = (
       ctx.globalAlpha = 1;
 
     } else if (element.type === ShapeType.CONNECTOR) {
-      connectorManager.drawConnector(ctx, element as ConnectorElement, roughRenderer);
+      connectorManager.drawConnector(ctx, element as ConnectorElement, elementsMap, roughRenderer, selectedIds.has(element.id));
     } else {
       renderShape(rc, element as unknown as ShapeElement);
     }
