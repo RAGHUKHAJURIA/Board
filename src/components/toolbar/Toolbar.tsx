@@ -4,7 +4,7 @@ import React from 'react';
 import { motion } from 'framer-motion';
 import { 
   MousePointer2, Hand, Square, Circle, Triangle, Minus, ArrowRight, 
-  Hexagon, Pen, Eraser, Baseline
+  Hexagon, Pen, Eraser, Baseline, Image as ImageIcon
 } from 'lucide-react';
 import { useCanvasStore } from '@/store/canvas-store';
 import { ShapeType } from '@/types';
@@ -68,6 +68,10 @@ export function Toolbar() {
         <ToolButton 
           icon={Baseline} label="Text" shortcut="T" 
           isActive={tool === 'text'} onClick={() => setTool('text')} 
+        />
+        <ToolButton 
+          icon={ImageIcon} label="Image" 
+          isActive={tool === ShapeType.IMAGE} onClick={() => setTool(ShapeType.IMAGE)} 
         />
         <ToolButton 
           icon={Eraser} label="Eraser" shortcut="E" 

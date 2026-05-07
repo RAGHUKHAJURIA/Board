@@ -1,7 +1,10 @@
 import { WhiteboardElement } from '@/types';
 
-export const exportToJSON = (elements: Record<string, WhiteboardElement>) => {
-  const data = JSON.stringify(Object.values(elements), null, 2);
+export const exportToJSON = (elements: Record<string, WhiteboardElement>, background: string = 'transparent') => {
+  const data = JSON.stringify({
+    elements: Object.values(elements),
+    background
+  }, null, 2);
   const blob = new Blob([data], { type: 'application/json' });
   const url = URL.createObjectURL(blob);
   
@@ -14,14 +17,18 @@ export const exportToJSON = (elements: Record<string, WhiteboardElement>) => {
   URL.revokeObjectURL(url);
 };
 
-export const importFromJSON = async (file: File): Promise<WhiteboardElement[]> => {
+export const importFromJSON = async (file: File): Promise<{elements: WhiteboardElement[], background: string}> => {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = (e) => {
       try {
         const json = e.target?.result as string;
-        const elements = JSON.parse(json);
-        resolve(elements);
+        const parsed = JSON.parse(json);
+        if (Array.isArray(parsed)) {
+          resolve({ elements: parsed, background: 'transparent' });
+        } else {
+          resolve({ elements: parsed.elements || [], background: parsed.background || 'transparent' });
+        }
       } catch (err) {
         reject(err);
       }

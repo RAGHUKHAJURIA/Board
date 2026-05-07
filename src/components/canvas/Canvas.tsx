@@ -4,13 +4,14 @@ import React, { useEffect, useRef, useState, useCallback, useMemo } from 'react'
 import { useCanvasStore } from '@/store/canvas-store';
 import { useUIStore } from '@/store/ui-store';
 import { renderCanvas } from '@/lib/canvas/renderer';
-import { Point, ShapeType, WhiteboardElement, FreehandElement, ShapeElement, TextElement, ConnectorElement } from '@/types';
+import { Point, ShapeType, WhiteboardElement, FreehandElement, ShapeElement, TextElement, ConnectorElement, ImageElement } from '@/types';
 import { isPointInBox } from '@/lib/utils/geometry';
 import { SelectionBox } from './SelectionBox';
 import { ResizeHandle } from '@/lib/utils/transforms';
 import { resizeElement as calcResizedBounds } from '@/lib/utils/transforms';
 import { v4 as uuidv4 } from 'uuid';
 import { SpatialIndex } from '@/lib/canvas/spatial-index';
+import { ImageHandler } from '@/lib/canvas/image-handler';
 import { EraserManager } from '@/lib/canvas/eraser-manager';
 import { ConnectorManager } from '@/lib/canvas/connectors';
 import { debounce } from '@/lib/utils/debounce';
@@ -40,10 +41,16 @@ export function Canvas() {
   const selectedIds = useCanvasStore(state => state.selectedIds);
   const viewport = useCanvasStore(state => state.viewport);
   const tool = useCanvasStore(state => state.tool);
+  const canvasBackground = useCanvasStore(state => state.canvasBackground);
   const { addElement, updateElement, deleteElements, selectElements, clearSelection, updateViewport, saveSnapshot, setTool, setIsInteracting, batchErase } = useCanvasStore();
 
   const currentStyle = useUIStore(state => state.currentStyle);
   const grid = useUIStore(state => state.grid);
+  const theme = useUIStore(state => state.theme);
+
+  const resolvedTheme: 'light' | 'dark' = theme === 'system'
+    ? (typeof window !== 'undefined' && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')
+    : theme;
   const eraserSettings = useCanvasStore(state => state.eraserSettings);
 
   // Interaction state
@@ -57,6 +64,9 @@ export function Canvas() {
   const [textEditingId, setTextEditingId] = useState<string | null>(null);
   const [textEditorStyle, setTextEditorStyle] = useState<React.CSSProperties>({});
   const textAreaRef = useRef<HTMLTextAreaElement>(null);
+
+  // Image Upload
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const currentElementRef = useRef<WhiteboardElement | null>(null);
   const lastPointerPos = useRef<Point>({ x: 0, y: 0 }); // screen coords
@@ -120,8 +130,43 @@ export function Canvas() {
       }
     };
 
+    const onPaste = async (e: ClipboardEvent) => {
+      // Skip if a text input is focused
+      const tag = (e.target as HTMLElement)?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+
+      if (e.clipboardData && e.clipboardData.items) {
+        const items = Array.from(e.clipboardData.items);
+        for (const item of items) {
+          if (item.type.indexOf('image') !== -1) {
+            e.preventDefault();
+            const file = item.getAsFile();
+            if (file) {
+              const imageHandler = new ImageHandler();
+              const state = useCanvasStore.getState();
+              // Place in center of viewport
+              const cx = state.viewport.x + (state.viewport.width || window.innerWidth) / 2 / state.viewport.zoom;
+              const cy = state.viewport.y + (state.viewport.height || window.innerHeight) / 2 / state.viewport.zoom;
+              try {
+                const element = await imageHandler.handleImageDrop(file, cx, cy);
+                state.addElement(element);
+                state.selectElements([element.id]);
+              } catch (err) {
+                console.error('Failed to paste image', err);
+              }
+            }
+            break;
+          }
+        }
+      }
+    };
+
     window.addEventListener('keydown', onKeyDown);
-    return () => window.removeEventListener('keydown', onKeyDown);
+    window.addEventListener('paste', onPaste);
+    return () => {
+      window.removeEventListener('keydown', onKeyDown);
+      window.removeEventListener('paste', onPaste);
+    };
   }, [clearSelection, setTool, deleteElements, saveSnapshot]);
 
   // Keep spatial index up to date (debounced for non-eraser updates)
@@ -171,7 +216,9 @@ export function Canvas() {
         Object.values(elements),
         selectedIds,
         viewport,
-        grid
+        grid,
+        canvasBackground,
+        resolvedTheme
       );
 
       // Draw rubber-band selection rectangle (Excalidraw style)
@@ -247,7 +294,7 @@ export function Canvas() {
 
     render();
     return () => cancelAnimationFrame(frameId);
-  }, [elements, selectedIds, viewport, grid, selectionBox]);
+  }, [elements, selectedIds, viewport, grid, selectionBox, canvasBackground, resolvedTheme]);
 
   // Screen → world
   const screenToWorld = (sx: number, sy: number): Point => ({
@@ -280,6 +327,16 @@ export function Canvas() {
     // Middle button or hand tool → pan
     if (e.button === 1 || tool === 'hand') {
       setMode('panning');
+      return;
+    }
+
+    // Image tool -> trigger file upload
+    if (tool === ShapeType.IMAGE) {
+      if (fileInputRef.current) {
+        fileInputRef.current.click();
+      }
+      // Delay tool switch to let dialog open instantly
+      setTimeout(() => setTool('select'), 0);
       return;
     }
 
@@ -639,7 +696,8 @@ export function Canvas() {
         const el = useCanvasStore.getState().elements[elId];
         if (!el) break;
 
-        const newBounds = calcResizedBounds(handle, el.x, el.y, el.width, el.height, wdx, wdy, e.shiftKey);
+        const preserveRatio = e.shiftKey || (el.type === ShapeType.IMAGE && (el as ImageElement).lockAspectRatio);
+        const newBounds = calcResizedBounds(handle, el.x, el.y, el.width, el.height, wdx, wdy, preserveRatio);
         updateElement(elId, newBounds);
         break;
       }
@@ -1104,7 +1162,45 @@ export function Canvas() {
     if (mode === 'dragging') return 'move';
     if (mode === 'resizing') return 'nwse-resize';
     if (mode === 'rotating') return 'grabbing';
+    if (tool === ShapeType.IMAGE) return 'crosshair';
     return 'crosshair';
+  };
+
+  const handleImageFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      const world = lastPointerWorldPos.current || { x: 0, y: 0 };
+      const imageHandler = new ImageHandler();
+      try {
+        const element = await imageHandler.handleImageDrop(file, world.x, world.y);
+        addElement(element);
+        selectElements([element.id]);
+      } catch (err) {
+        console.error('Failed to load image', err);
+      }
+    }
+    if (fileInputRef.current) fileInputRef.current.value = '';
+  };
+
+  const handleDrop = async (e: React.DragEvent) => {
+    e.preventDefault();
+    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+      const file = e.dataTransfer.files[0];
+      if (file && file.type.indexOf('image') !== -1) {
+        const rect = canvasRef.current?.getBoundingClientRect();
+        if (rect) {
+          const world = screenToWorld(e.clientX - rect.left, e.clientY - rect.top);
+          const imageHandler = new ImageHandler();
+          try {
+            const element = await imageHandler.handleImageDrop(file, world.x, world.y);
+            addElement(element);
+            selectElements([element.id]);
+          } catch (err) {
+            console.error('Failed to load dropped image', err);
+          }
+        }
+      }
+    }
   };
 
   return (
@@ -1114,7 +1210,16 @@ export function Canvas() {
       style={{ cursor: getCursor(), overflow: 'hidden' }}
       onPointerMove={handlePointerMove}
       onPointerUp={handlePointerUp}
+      onDrop={handleDrop}
+      onDragOver={(e) => e.preventDefault()}
     >
+      <input 
+        type="file" 
+        ref={fileInputRef} 
+        hidden 
+        accept=".png,.jpg,.jpeg,.gif,.webp,.svg" 
+        onChange={handleImageFileSelect} 
+      />
       <canvas
         ref={canvasRef}
         onPointerDown={handlePointerDown}

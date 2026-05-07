@@ -13,10 +13,16 @@ export function LayersPanel() {
   const elements = useCanvasStore(state => state.elements);
   const selectedIds = useCanvasStore(state => state.selectedIds);
   const { selectElements } = useCanvasStore();
+  const canvasBackground = useCanvasStore(state => state.canvasBackground);
   
   const panels = useUIStore(state => state.panels);
   const grid = useUIStore(state => state.grid);
   const togglePanel = useUIStore(state => state.togglePanel);
+
+  const theme = useUIStore(state => state.theme);
+  const resolvedTheme: 'light' | 'dark' = theme === 'system'
+    ? (typeof window !== 'undefined' && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')
+    : theme;
 
   if (!panels.layers) {
     return (
@@ -117,13 +123,13 @@ export function LayersPanel() {
       
       <div className="p-3 border-t border-zinc-200 dark:border-zinc-800 flex gap-2">
         <button 
-          onClick={() => exportToPNG({ elements: Object.values(elements), grid })}
+          onClick={() => exportToPNG({ elements: Object.values(elements), grid, background: canvasBackground, resolvedTheme })}
           className="flex-1 flex items-center justify-center gap-2 bg-zinc-200 dark:bg-zinc-800 hover:bg-zinc-700 text-zinc-700 dark:text-zinc-300 text-xs py-2 rounded"
         >
           <Download size={14} /> PNG
         </button>
         <button 
-          onClick={() => exportToJSON(elements)}
+          onClick={() => exportToJSON(elements, canvasBackground)}
           className="flex-1 flex items-center justify-center gap-2 bg-zinc-200 dark:bg-zinc-800 hover:bg-zinc-700 text-zinc-700 dark:text-zinc-300 text-xs py-2 rounded"
         >
           <FileJson size={14} /> JSON

@@ -11,13 +11,22 @@ export const renderCanvas = (
   elements: WhiteboardElement[],
   selectedIds: Set<string>,
   viewport: Viewport,
-  grid: GridSettings
+  grid: GridSettings,
+  canvasBackground: string = '#1e1e1e',
+  resolvedTheme: 'light' | 'dark' = 'dark'
 ) => {
   const ctx = canvas.getContext('2d');
   if (!ctx) return;
 
-  // Clear canvas
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  // Draw background (zoom-safe — reset transform first)
+  ctx.save();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  const bgFill = canvasBackground === 'transparent'
+    ? (resolvedTheme === 'light' ? '#ffffff' : '#000000')
+    : canvasBackground;
+  ctx.fillStyle = bgFill;
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.restore();
 
   // Apply viewport
   ctx.save();

@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import { persist } from 'zustand/middleware';
 import { immer } from 'zustand/middleware/immer';
 import { enableMapSet } from 'immer';
 import { WhiteboardElement, ConnectorElement, Viewport, Tool, ShapeType } from '@/types';
@@ -10,6 +11,7 @@ enableMapSet();
 
 interface HistorySnapshot {
   elements: Record<string, WhiteboardElement>;
+  canvasBackground: string;
 }
 
 interface CanvasState {
@@ -19,12 +21,18 @@ interface CanvasState {
   tool: Tool;
   clipboard: WhiteboardElement[];
   isInteracting: boolean;
+  canvasBackground: string;
+  isCanvasBackgroundCustomized: boolean;
+
 
   // History for proper undo/redo
   history: HistorySnapshot[];
   historyIndex: number;
 
   // Actions
+  setCanvasBackground: (color: string) => void;
+  setIsCanvasBackgroundCustomized: (val: boolean) => void;
+  invertElementColors: (fromTheme: 'light' | 'dark', toTheme: 'light' | 'dark') => void;
   setIsInteracting: (val: boolean) => void;
   setTool: (tool: Tool) => void;
   addElement: (element: WhiteboardElement) => void;
@@ -93,14 +101,17 @@ const cloneElements = (elements: Record<string, WhiteboardElement>): Record<stri
 };
 
 export const useCanvasStore = create<CanvasState>()(
-  immer((set, get) => ({
+  persist(
+    immer((set, get) => ({
     elements: {},
     selectedIds: new Set(),
     viewport: { x: 0, y: 0, zoom: 1, width: 0, height: 0 },
     tool: 'select',
     clipboard: [],
     isInteracting: false,
-    history: [{ elements: {} }],
+    canvasBackground: '#000000',
+    isCanvasBackgroundCustomized: false,
+    history: [{ elements: {}, canvasBackground: '#000000' }],
     historyIndex: 0,
     connectorsByElement: new Map(),
     hoveredBindTarget: null,
@@ -155,6 +166,62 @@ export const useCanvasStore = create<CanvasState>()(
       state.isInteracting = val;
     }),
 
+    setCanvasBackground: (color) => set((state) => {
+      // Save snapshot before changing background
+      const newHistory = state.history.slice(0, state.historyIndex + 1);
+      newHistory.push({ elements: cloneElements(state.elements), canvasBackground: state.canvasBackground });
+      if (newHistory.length > 100) newHistory.shift();
+      state.history = newHistory;
+      state.historyIndex = newHistory.length - 1;
+
+      state.canvasBackground = color;
+    }),
+
+    setIsCanvasBackgroundCustomized: (val) => set((state) => {
+      state.isCanvasBackgroundCustomized = val;
+    }),
+
+    invertElementColors: (fromTheme, toTheme) => set((state) => {
+      // Elements drawn on dark theme typically have stroke: #ffffff or #e2e8f0 (slate-200 default)
+      // Elements drawn on light theme typically have stroke: #1e1e1e
+      // We swap ONLY these known defaults; custom colors stay unchanged
+      const DARK_DEFAULT_STROKES = ['#ffffff', '#e2e8f0']; // white & slate-200
+      const LIGHT_DEFAULT_STROKES = ['#1e1e1e', '#000000']; // near-black & black
+
+      const fromDefaults = fromTheme === 'dark' ? DARK_DEFAULT_STROKES : LIGHT_DEFAULT_STROKES;
+      const toDefault = toTheme === 'dark' ? '#e2e8f0' : '#1e1e1e';
+
+      let changed = false;
+      const newElements = cloneElements(state.elements);
+
+      Object.values(newElements).forEach((el) => {
+        // All elements extend BaseElement which has a `style` with `stroke`
+        if (el.style?.stroke && fromDefaults.includes(el.style.stroke)) {
+          el.style.stroke = toDefault;
+          changed = true;
+        }
+        // TextElements have a top-level `color` property
+        if ('color' in el && typeof (el as unknown as { color: string }).color === 'string') {
+          const textEl = el as unknown as { color: string };
+          if (fromDefaults.includes(textEl.color)) {
+            textEl.color = toDefault;
+            changed = true;
+          }
+        }
+      });
+
+      if (changed) {
+        // Save snapshot so Ctrl+Z can undo the inversion
+        const newHistory = state.history.slice(0, state.historyIndex + 1);
+        newHistory.push({ elements: cloneElements(state.elements), canvasBackground: state.canvasBackground });
+        if (newHistory.length > 100) newHistory.shift();
+        state.history = newHistory;
+        state.historyIndex = newHistory.length - 1;
+
+        state.elements = newElements;
+      }
+    }),
+
     setTool: (tool) => set((state) => {
       state.tool = tool;
       // Clear selection when switching to select tool so nothing is pre-selected
@@ -167,7 +234,7 @@ export const useCanvasStore = create<CanvasState>()(
     saveSnapshot: () => set((state) => {
       // Truncate future if we're not at the end
       const newHistory = state.history.slice(0, state.historyIndex + 1);
-      newHistory.push({ elements: cloneElements(state.elements) });
+      newHistory.push({ elements: cloneElements(state.elements), canvasBackground: state.canvasBackground });
       // Cap at 100 entries
       if (newHistory.length > 100) newHistory.shift();
       state.history = newHistory;
@@ -177,7 +244,7 @@ export const useCanvasStore = create<CanvasState>()(
     addElement: (element) => set((state) => {
       // Save snapshot before change
       const newHistory = state.history.slice(0, state.historyIndex + 1);
-      newHistory.push({ elements: cloneElements(state.elements) });
+      newHistory.push({ elements: cloneElements(state.elements), canvasBackground: state.canvasBackground });
       if (newHistory.length > 100) newHistory.shift();
       state.history = newHistory;
       state.historyIndex = newHistory.length - 1;
@@ -236,7 +303,7 @@ export const useCanvasStore = create<CanvasState>()(
     deleteElements: (ids) => set((state) => {
       // Save snapshot before deletion
       const newHistory = state.history.slice(0, state.historyIndex + 1);
-      newHistory.push({ elements: cloneElements(state.elements) });
+      newHistory.push({ elements: cloneElements(state.elements), canvasBackground: state.canvasBackground });
       if (newHistory.length > 100) newHistory.shift();
       state.history = newHistory;
       state.historyIndex = newHistory.length - 1;
@@ -393,6 +460,7 @@ export const useCanvasStore = create<CanvasState>()(
         const snapshot = state.history[state.historyIndex];
         if (snapshot) {
           state.elements = cloneElements(snapshot.elements);
+          state.canvasBackground = snapshot.canvasBackground;
           state.selectedIds.clear();
         }
       }
@@ -404,6 +472,7 @@ export const useCanvasStore = create<CanvasState>()(
         const snapshot = state.history[state.historyIndex];
         if (snapshot) {
           state.elements = cloneElements(snapshot.elements);
+          state.canvasBackground = snapshot.canvasBackground;
           state.selectedIds.clear();
         }
       }
@@ -425,7 +494,7 @@ export const useCanvasStore = create<CanvasState>()(
       
       // Save snapshot
       const newHistory = state.history.slice(0, state.historyIndex + 1);
-      newHistory.push({ elements: cloneElements(state.elements) });
+      newHistory.push({ elements: cloneElements(state.elements), canvasBackground: state.canvasBackground });
       state.history = newHistory;
       state.historyIndex = newHistory.length - 1;
 
@@ -567,5 +636,42 @@ export const useCanvasStore = create<CanvasState>()(
         y: cy - (cy - state.viewport.y) * scale,
       };
     }),
-  }))
+  })),
+  {
+    name: 'drawer-canvas-storage',
+    partialize: (state) => ({
+      elements: state.elements,
+      canvasBackground: state.canvasBackground,
+      isCanvasBackgroundCustomized: state.isCanvasBackgroundCustomized,
+      viewport: state.viewport,
+    }),
+    // Re-hydrate Sets/Maps since JSON stringify strips them.
+    // If background was never customized, re-derive it from the persisted theme.
+    merge: (persistedState: unknown, currentState: CanvasState) => {
+      const saved = persistedState as Partial<CanvasState> & { selectedIds?: string[] };
+      const merged = { ...currentState, ...saved };
+      merged.selectedIds = new Set(saved.selectedIds || []);
+
+      // If user never customized the background, reset it to the correct theme default.
+      // Read the saved theme directly from localStorage (ui-store persists it there).
+      if (!saved.isCanvasBackgroundCustomized) {
+        let savedTheme: 'dark' | 'light' = 'dark';
+        try {
+          const uiStorage = localStorage.getItem('drawer-ui-storage');
+          if (uiStorage) {
+            const parsed = JSON.parse(uiStorage) as { state?: { theme?: string } };
+            const t = parsed?.state?.theme;
+            if (t === 'light' || t === 'dark') savedTheme = t;
+            else if (t === 'system') {
+              savedTheme = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+            }
+          }
+        } catch { /* ignore */ }
+        merged.canvasBackground = savedTheme === 'light' ? '#ffffff' : '#000000';
+      }
+
+      return merged;
+    }
+  }
+  )
 );

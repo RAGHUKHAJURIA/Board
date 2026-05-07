@@ -70,8 +70,14 @@ export interface TextElement extends BaseElement {
 
 export interface ImageElement extends BaseElement {
   type: ShapeType.IMAGE;
-  imageData: string;
+  src: string;
+  originalWidth: number;
+  originalHeight: number;
+  aspectRatio: number;
   opacity: number;
+  flipX: boolean;
+  flipY: boolean;
+  lockAspectRatio: boolean;
 }
 
 export interface ConnectorElement extends BaseElement {

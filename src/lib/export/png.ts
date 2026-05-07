@@ -6,9 +6,10 @@ interface ExportOptions {
   grid: GridSettings;
   scale?: number;
   background?: string;
+  resolvedTheme?: 'light' | 'dark';
 }
 
-export const exportToPNG = async ({ elements, grid, scale = 2, background = '#09090b' }: ExportOptions) => {
+export const exportToPNG = async ({ elements, grid, scale = 2, background = '#1e1e1e', resolvedTheme = 'dark' }: ExportOptions) => {
   // Find bounding box of all elements to just export the drawn area
   if (elements.length === 0) return;
 
@@ -35,7 +36,10 @@ export const exportToPNG = async ({ elements, grid, scale = 2, background = '#09
   if (!ctx) return;
 
   ctx.scale(finalScale, finalScale);
-  ctx.fillStyle = background;
+  const bgFill = background === 'transparent'
+    ? (resolvedTheme === 'light' ? '#ffffff' : '#1e1e1e')
+    : background;
+  ctx.fillStyle = bgFill;
   ctx.fillRect(0, 0, width, height);
 
   const exportViewport: Viewport = {
@@ -49,7 +53,7 @@ export const exportToPNG = async ({ elements, grid, scale = 2, background = '#09
   // Temporarily clear selected IDs for export
   const selectedIds = new Set<string>();
 
-  renderCanvas(canvas, elements, selectedIds, exportViewport, grid);
+  renderCanvas(canvas, elements, selectedIds, exportViewport, grid, background, resolvedTheme);
 
   // Convert to image and download
   const dataUrl = canvas.toDataURL('image/png');

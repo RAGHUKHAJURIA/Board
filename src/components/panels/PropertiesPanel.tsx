@@ -12,7 +12,7 @@ import {
 import { useCanvasStore } from '@/store/canvas-store';
 import { useUIStore } from '@/store/ui-store';
 import { ColorPicker } from '../toolbar/ColorPicker';
-import { WhiteboardElement, ShapeType, ConnectorElement } from '@/types';
+import { WhiteboardElement, ShapeType, ConnectorElement, ImageElement } from '@/types';
 
 export function PropertiesPanel() {
   const elements = useCanvasStore(state => state.elements);
@@ -137,66 +137,106 @@ export function PropertiesPanel() {
         <div className="flex flex-col gap-3">
           <span className="text-xs font-semibold uppercase text-zinc-500 tracking-wider">Appearance</span>
 
-          <div className="flex items-center gap-4">
-            <ColorPicker color={element.style.stroke} onChange={(c) => handleStyleChange('stroke', c)} label="Stroke" />
-            <ColorPicker color={element.style.fill} onChange={(c) => handleStyleChange('fill', c)} label="Fill" allowTransparent />
-          </div>
+          {element.type !== ShapeType.IMAGE && (
+            <div className="flex items-center gap-4">
+              <ColorPicker color={element.style.stroke} onChange={(c) => handleStyleChange('stroke', c)} label="Stroke" />
+              <ColorPicker color={element.style.fill} onChange={(c) => handleStyleChange('fill', c)} label="Fill" allowTransparent />
+            </div>
+          )}
+
+          {element.type === ShapeType.IMAGE && (
+            <div className="flex flex-col gap-1">
+              <span className="text-[10px] text-zinc-500 dark:text-zinc-400">Image Options</span>
+              <div className="flex gap-2">
+                <button
+                  onClick={() => handleChange({ flipX: !(element as ImageElement).flipX })}
+                  className={`px-2 py-1 text-[10px] rounded border flex-1 ${(element as ImageElement).flipX ? 'border-foreground bg-foreground text-background font-medium' : 'border-zinc-300 dark:border-zinc-700 text-zinc-500 hover:border-zinc-500'}`}
+                >
+                  Flip H
+                </button>
+                <button
+                  onClick={() => handleChange({ flipY: !(element as ImageElement).flipY })}
+                  className={`px-2 py-1 text-[10px] rounded border flex-1 ${(element as ImageElement).flipY ? 'border-foreground bg-foreground text-background font-medium' : 'border-zinc-300 dark:border-zinc-700 text-zinc-500 hover:border-zinc-500'}`}
+                >
+                  Flip V
+                </button>
+                <button
+                  onClick={() => handleChange({ lockAspectRatio: !(element as ImageElement).lockAspectRatio })}
+                  className={`px-2 py-1 text-[10px] rounded border flex-1 ${(element as ImageElement).lockAspectRatio ? 'border-foreground bg-foreground text-background font-medium' : 'border-zinc-300 dark:border-zinc-700 text-zinc-500 hover:border-zinc-500'}`}
+                >
+                  Lock Ratio
+                </button>
+              </div>
+            </div>
+          )}
+
+          {element.type !== ShapeType.IMAGE && (
+            <div className="flex flex-col gap-1">
+              <div className="flex justify-between text-[10px] text-zinc-500 dark:text-zinc-400">
+                <span>Stroke Width</span><span>{element.style.strokeWidth}px</span>
+              </div>
+              <input
+                type="range" min="1" max="20" step="1"
+                value={element.style.strokeWidth}
+                onChange={(e) => handleStyleChange('strokeWidth', parseInt(e.target.value))}
+                className="accent-foreground"
+              />
+            </div>
+          )}
 
           <div className="flex flex-col gap-1">
             <div className="flex justify-between text-[10px] text-zinc-500 dark:text-zinc-400">
-              <span>Stroke Width</span><span>{element.style.strokeWidth}px</span>
+              <span>Opacity</span><span>{Math.round(element.type === ShapeType.IMAGE ? ((element as ImageElement).opacity ?? 100) : element.style.opacity * 100)}%</span>
             </div>
             <input
-              type="range" min="1" max="20" step="1"
-              value={element.style.strokeWidth}
-              onChange={(e) => handleStyleChange('strokeWidth', parseInt(e.target.value))}
+              type="range" min="0" max={element.type === ShapeType.IMAGE ? "100" : "1"} step={element.type === ShapeType.IMAGE ? "1" : "0.05"}
+              value={element.type === ShapeType.IMAGE ? ((element as ImageElement).opacity ?? 100) : element.style.opacity}
+              onChange={(e) => {
+                if (element.type === ShapeType.IMAGE) {
+                  handleChange({ opacity: parseFloat(e.target.value) });
+                } else {
+                  handleStyleChange('opacity', parseFloat(e.target.value));
+                }
+              }}
               className="accent-foreground"
             />
           </div>
 
-          <div className="flex flex-col gap-1">
-            <div className="flex justify-between text-[10px] text-zinc-500 dark:text-zinc-400">
-              <span>Opacity</span><span>{Math.round(element.style.opacity * 100)}%</span>
+          {element.type !== ShapeType.IMAGE && (
+            <div className="flex flex-col gap-1">
+              <div className="flex justify-between text-[10px] text-zinc-500 dark:text-zinc-400">
+                <span>Roughness</span><span>{element.style.roughness}</span>
+              </div>
+              <input
+                type="range" min="0" max="5" step="0.5"
+                value={element.style.roughness}
+                onChange={(e) => handleStyleChange('roughness', parseFloat(e.target.value))}
+                className="accent-foreground"
+              />
             </div>
-            <input
-              type="range" min="0" max="1" step="0.05"
-              value={element.style.opacity}
-              onChange={(e) => handleStyleChange('opacity', parseFloat(e.target.value))}
-              className="accent-foreground"
-            />
-          </div>
-
-          <div className="flex flex-col gap-1">
-            <div className="flex justify-between text-[10px] text-zinc-500 dark:text-zinc-400">
-              <span>Roughness</span><span>{element.style.roughness}</span>
-            </div>
-            <input
-              type="range" min="0" max="5" step="0.5"
-              value={element.style.roughness}
-              onChange={(e) => handleStyleChange('roughness', parseFloat(e.target.value))}
-              className="accent-foreground"
-            />
-          </div>
+          )}
 
           {/* Stroke style */}
-          <div className="flex flex-col gap-1">
-            <span className="text-[10px] text-zinc-500 dark:text-zinc-400">Stroke Style</span>
-            <div className="flex gap-2">
-              {(['solid', 'dashed', 'dotted'] as const).map(s => (
-                <button
-                  key={s}
-                  onClick={() => handleStyleChange('strokeStyle', s)}
-                  className={`px-3 py-1 text-xs rounded border capitalize ${
-                    element.style.strokeStyle === s
-                      ? 'border-foreground bg-foreground text-background font-medium'
-                      : 'border-zinc-300 dark:border-zinc-700 text-zinc-500 hover:border-zinc-500'
-                  }`}
-                >
-                  {s}
-                </button>
-              ))}
+          {element.type !== ShapeType.IMAGE && (
+            <div className="flex flex-col gap-1">
+              <span className="text-[10px] text-zinc-500 dark:text-zinc-400">Stroke Style</span>
+              <div className="flex gap-2">
+                {(['solid', 'dashed', 'dotted'] as const).map(s => (
+                  <button
+                    key={s}
+                    onClick={() => handleStyleChange('strokeStyle', s)}
+                    className={`px-3 py-1 text-xs rounded border capitalize ${
+                      element.style.strokeStyle === s
+                        ? 'border-foreground bg-foreground text-background font-medium'
+                        : 'border-zinc-300 dark:border-zinc-700 text-zinc-500 hover:border-zinc-500'
+                    }`}
+                  >
+                    {s}
+                  </button>
+                ))}
+              </div>
             </div>
-          </div>
+          )}
 
           {/* Connector Routing Mode */}
           {element.type === ShapeType.CONNECTOR && (
