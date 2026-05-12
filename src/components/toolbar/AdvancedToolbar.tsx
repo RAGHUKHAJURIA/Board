@@ -28,6 +28,7 @@ import {
   LayoutList,
   LayoutDashboard,
   X,
+  Plus,
 } from 'lucide-react';
 import { ShapeType } from '@/types';
 
@@ -256,6 +257,7 @@ export function AdvancedToolbar() {
     { id: ShapeType.FREEHAND, icon: Pencil, label: 'Pen (P)' },
     { id: ShapeType.TEXT, icon: Type, label: 'Text (T)' },
     { id: ShapeType.IMAGE, icon: ImageIcon, label: 'Image' },
+    { id: 'icon-picker', icon: Plus, label: 'Icons' },
     { id: 'eraser', icon: Eraser, label: 'Eraser (E)' },
   ];
 
@@ -270,10 +272,20 @@ export function AdvancedToolbar() {
     }
 
     const Icon = t.icon;
-    const isActive = tool === t.id;
+    const isIconPickerOpen = useCanvasStore((state) => state.iconPickerOpen);
+    const setIconPickerOpen = useCanvasStore((state) => state.setIconPickerOpen);
+    
+    // For icon picker, it's not a persistent "tool" in the same way, but it behaves like an open modal
+    const isActive = t.id === 'icon-picker' ? isIconPickerOpen : tool === t.id;
 
     const handleClick = (e: React.MouseEvent) => {
       e.stopPropagation();
+      
+      if (t.id === 'icon-picker') {
+        setIconPickerOpen(!isIconPickerOpen);
+        return;
+      }
+      
       setTool(t.id as import('@/types').Tool);
 
       if (t.id === ShapeType.FREEHAND) {

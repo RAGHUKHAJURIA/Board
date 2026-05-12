@@ -5,6 +5,7 @@ import { renderFreehand } from './freehand';
 import { ImageHandler } from './image-handler';
 import { ConnectorManager } from './connectors';
 import { RoughRenderer } from './rough-renderer';
+import { drawIconElement, getIconBitmapSync, getIconBitmap } from './icon-renderer';
 
 export const renderCanvas = (
   canvas: HTMLCanvasElement,
@@ -87,6 +88,18 @@ export const renderCanvas = (
 
     } else if (element.type === ShapeType.CONNECTOR) {
       connectorManager.drawConnector(ctx, element as ConnectorElement, elementsMap, roughRenderer, selectedIds.has(element.id));
+      if (selectedIds.has(element.id)) {
+        drawConnectorHandles(ctx, element as ConnectorElement, viewport.zoom);
+      }
+    } else if (element.type === ShapeType.ICON) {
+      const iconEl = element as any;
+      const bitmap = getIconBitmapSync(iconEl);
+      if (bitmap) {
+        drawIconElement(ctx, iconEl, bitmap);
+      } else {
+        // Trigger fetch, will render on next frame once loaded
+        getIconBitmap(iconEl);
+      }
     } else {
       renderShape(rc, element as unknown as ShapeElement);
     }
@@ -143,3 +156,76 @@ const renderGrid = (
 
   ctx.restore();
 };
+
+import { getConnectorMidpoint } from './connectors';
+
+export function drawConnectorHandles(
+  ctx: CanvasRenderingContext2D,
+  el: ConnectorElement,
+  zoom: number
+) {
+  const HANDLE_RADIUS = Math.max(5, 7 / zoom); 
+  const HANDLE_FILL = 'rgba(255, 255, 255, 0.95)';
+  const HANDLE_STROKE = '#4f8ef7';
+  const HANDLE_STROKE_WIDTH = 1.5 / zoom;
+
+  const mid = getConnectorMidpoint(el);
+  drawCircleHandle(ctx, mid.x, mid.y, HANDLE_RADIUS, HANDLE_FILL, HANDLE_STROKE, HANDLE_STROKE_WIDTH);
+
+  drawCircleHandle(ctx, el.startX, el.startY, HANDLE_RADIUS, HANDLE_FILL, HANDLE_STROKE, HANDLE_STROKE_WIDTH);
+  drawCircleHandle(ctx, el.endX, el.endY, HANDLE_RADIUS, HANDLE_FILL, HANDLE_STROKE, HANDLE_STROKE_WIDTH);
+
+  if (el.isManuallyRouted && el.controlPoints) {
+    for (const cp of el.controlPoints) {
+      if (!cp) continue;
+      ctx.save();
+      ctx.setLineDash([3 / zoom, 3 / zoom]);
+      ctx.strokeStyle = 'rgba(79, 142, 247, 0.4)';
+      ctx.lineWidth = 1 / zoom;
+      ctx.beginPath();
+      ctx.moveTo(el.startX, el.startY);
+      ctx.lineTo(cp.x, cp.y);
+      ctx.lineTo(el.endX, el.endY);
+      ctx.stroke();
+      ctx.restore();
+
+      drawDiamondHandle(ctx, cp.x, cp.y, HANDLE_RADIUS * 0.8, HANDLE_FILL, HANDLE_STROKE, HANDLE_STROKE_WIDTH);
+    }
+  }
+}
+
+function drawCircleHandle(
+  ctx: CanvasRenderingContext2D,
+  x: number, y: number, r: number,
+  fill: string, stroke: string, strokeWidth: number
+) {
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(x, y, r, 0, Math.PI * 2);
+  ctx.fillStyle = fill;
+  ctx.fill();
+  ctx.strokeStyle = stroke;
+  ctx.lineWidth = strokeWidth;
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawDiamondHandle(
+  ctx: CanvasRenderingContext2D,
+  x: number, y: number, r: number,
+  fill: string, stroke: string, strokeWidth: number
+) {
+  ctx.save();
+  ctx.beginPath();
+  ctx.moveTo(x, y - r);
+  ctx.lineTo(x + r, y);
+  ctx.lineTo(x, y + r);
+  ctx.lineTo(x - r, y);
+  ctx.closePath();
+  ctx.fillStyle = fill;
+  ctx.fill();
+  ctx.strokeStyle = stroke;
+  ctx.lineWidth = strokeWidth;
+  ctx.stroke();
+  ctx.restore();
+}

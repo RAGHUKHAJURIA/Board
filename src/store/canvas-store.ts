@@ -2,9 +2,11 @@ import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import { immer } from 'zustand/middleware/immer';
 import { enableMapSet } from 'immer';
-import { WhiteboardElement, ConnectorElement, Viewport, Tool, ShapeType } from '@/types';
+import { WhiteboardElement, ConnectorElement, Viewport, Tool, ShapeType, IconElement } from '@/types';
 import { getElementBBox } from '@/lib/utils/geometry';
 import { ConnectorManager } from '@/lib/canvas/connectors';
+import { ConnectorHandleHit } from '@/lib/canvas/hit-testing';
+import { useUIStore } from '@/store/ui-store';
 
 // Enable Immer MapSet plugin for using Set/Map in Immer state
 enableMapSet();
@@ -14,15 +16,24 @@ interface HistorySnapshot {
   canvasBackground: string;
 }
 
+export interface InputState {
+  activePointerType: 'pen' | 'touch' | 'mouse';
+  isPenHovering: boolean;
+  lastPressure: number;
+}
+
 interface CanvasState {
   elements: Record<string, WhiteboardElement>;
   selectedIds: Set<string>;
+  activeHandle: ConnectorHandleHit | null;
   viewport: Viewport;
   tool: Tool;
   clipboard: WhiteboardElement[];
   isInteracting: boolean;
   canvasBackground: string;
   isCanvasBackgroundCustomized: boolean;
+  iconPickerOpen: boolean;
+  inputState: InputState;
 
 
   // History for proper undo/redo
@@ -30,6 +41,8 @@ interface CanvasState {
   historyIndex: number;
 
   // Actions
+  setInputState: (patch: Partial<InputState>) => void;
+  setActiveHandle: (handle: ConnectorHandleHit | null) => void;
   setCanvasBackground: (color: string) => void;
   setIsCanvasBackgroundCustomized: (val: boolean) => void;
   invertElementColors: (fromTheme: 'light' | 'dark', toTheme: 'light' | 'dark') => void;
@@ -42,6 +55,10 @@ interface CanvasState {
   clearSelection: () => void;
   selectAll: () => void;
   updateViewport: (viewport: Partial<Viewport>) => void;
+
+  setIconPickerOpen: (open: boolean) => void;
+  addIconElement: (iconName: string, iconLibrary: 'lucide' | 'tabler') => void;
+  updateIconElement: (id: string, patch: Partial<IconElement>) => void;
 
   // Undo/redo
   saveSnapshot: () => void;
@@ -111,11 +128,25 @@ export const useCanvasStore = create<CanvasState>()(
     isInteracting: false,
     canvasBackground: '#000000',
     isCanvasBackgroundCustomized: false,
+    iconPickerOpen: false,
+    inputState: {
+      activePointerType: 'mouse',
+      isPenHovering: false,
+      lastPressure: 0.5,
+    },
     history: [{ elements: {}, canvasBackground: '#000000' }],
     historyIndex: 0,
     connectorsByElement: new Map(),
     hoveredBindTarget: null,
     draftConnector: null,
+    activeHandle: null,
+    
+    setInputState: (patch) => set((state) => {
+      Object.assign(state.inputState, patch);
+    }),
+    setActiveHandle: (handle) => set((state) => {
+      state.activeHandle = handle;
+    }),
     eraserSettings: {
       mode: 'object',
       size: 30,
@@ -161,6 +192,63 @@ export const useCanvasStore = create<CanvasState>()(
     getElement: (id) => {
       return get().elements[id];
     },
+
+    setIconPickerOpen: (open) => set((state) => {
+      state.iconPickerOpen = open;
+    }),
+
+    addIconElement: (iconName, iconLibrary) => {
+      const { viewport } = get();
+      const currentStyle = (useUIStore as any).getState?.()?.currentStyle || { stroke: '#e2e8f0', strokeWidth: 2 };
+      
+      // Place at center of current viewport in world coordinates
+      const worldX = (-viewport.x + window.innerWidth / 2) / viewport.zoom - 24;
+      const worldY = (-viewport.y + window.innerHeight / 2) / viewport.zoom - 24;
+      
+      const zIndices = Object.values(get().elements).map(e => e.zIndex);
+      const maxZIndex = zIndices.length > 0 ? Math.max(...zIndices) : 0;
+
+      const element = {
+        id: crypto.randomUUID(),
+        type: ShapeType.ICON,
+        x: worldX,
+        y: worldY,
+        width: 48,
+        height: 48,
+        rotation: 0,
+        locked: false,
+        zIndex: maxZIndex + 1,
+        style: {
+          stroke: currentStyle.stroke,
+          strokeWidth: currentStyle.strokeWidth || 2,
+          opacity: 1,
+          fill: 'transparent',
+          roughness: 0,
+          strokeStyle: 'solid',
+        },
+        iconName,
+        iconLibrary,
+        color: currentStyle.stroke,
+      } as any; // Cast as any because IconElement imports might be tricky without adding it to types
+
+      element.bbox = getElementBBox(element);
+
+      // Save snapshot before change
+      get().saveSnapshot();
+
+      set((state) => {
+        state.elements[element.id] = element;
+        state.selectedIds = new Set([element.id]);
+        state.iconPickerOpen = false;
+      });
+    },
+
+    updateIconElement: (id, patch) => set((state) => {
+      if (state.elements[id] && state.elements[id].type === ShapeType.ICON) {
+        Object.assign(state.elements[id], patch);
+        state.elements[id].bbox = getElementBBox(state.elements[id]);
+      }
+    }),
 
     setIsInteracting: (val) => set((state) => {
       state.isInteracting = val;

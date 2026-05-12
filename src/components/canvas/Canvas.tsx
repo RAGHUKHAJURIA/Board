@@ -7,6 +7,7 @@ import { renderCanvas } from '@/lib/canvas/renderer';
 import { Point, ShapeType, WhiteboardElement, FreehandElement, ShapeElement, TextElement, ConnectorElement, ImageElement } from '@/types';
 import { isPointInBox } from '@/lib/utils/geometry';
 import { SelectionBox } from './SelectionBox';
+import { IconPicker } from './IconPicker';
 import { ResizeHandle } from '@/lib/utils/transforms';
 import { resizeElement as calcResizedBounds } from '@/lib/utils/transforms';
 import { v4 as uuidv4 } from 'uuid';
@@ -16,7 +17,13 @@ import { EraserManager } from '@/lib/canvas/eraser-manager';
 import { ConnectorManager } from '@/lib/canvas/connectors';
 import { debounce } from '@/lib/utils/debounce';
 import { getTopElementAtPoint, getElementsInSelectionBox } from '@/lib/canvas/hit-test';
-import { buildConnectionGraph, findConnectedComponent } from '@/lib/canvas/connected-components';
+import { hitTestPoint, hitTestConnectorHandles } from '@/lib/canvas/hit-testing';
+import { extractStylusPoint, extractAllCoalescedPoints } from '@/lib/input/pointer-utils';
+import { palmRejection } from '@/lib/input/palm-rejection';
+import { gestureHandler } from '@/lib/input/gesture-handler';
+import { handleStylusBarrelButton, detectPencilDoubleTap } from '@/lib/input/stylus-buttons';
+import { PenCursor } from './PenCursor';
+
 type InteractionMode =
   | 'idle'
   | 'panning'
@@ -52,6 +59,10 @@ export function Canvas() {
     ? (typeof window !== 'undefined' && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')
     : theme;
   const eraserSettings = useCanvasStore(state => state.eraserSettings);
+  const setInputState = useCanvasStore(state => state.setInputState);
+
+  // Tablet / iPad pointers
+  const rejectedPointers = useRef(new Set<number>());
 
   // Interaction state
   const modeRef = useRef<InteractionMode>('idle');
@@ -76,6 +87,9 @@ export function Canvas() {
   const dragStartElementPositions = useRef<Record<string, Point>>({});
   const resizeHandleRef = useRef<ResizeHandle | null>(null);
   const resizeStartBounds = useRef<{ x: number; y: number; width: number; height: number } | null>(null);
+  const resizeGroupStartBounds = useRef<{ x: number; y: number; width: number; height: number } | null>(null);
+  const activeGroupBounds = useRef<{ x: number; y: number; width: number; height: number } | null>(null);
+  const resizeElementStartBoundsRef = useRef<Record<string, { x: number; y: number; width: number; height: number; type: string; controlPoints?: any[] }>>({});
   const resizeElementIdRef = useRef<string | null>(null);
   const rotateStartAngle = useRef<number>(0);
   const rotateCenter = useRef<Point>({ x: 0, y: 0 });
@@ -312,6 +326,37 @@ export function Canvas() {
   const handlePointerDown = (e: React.PointerEvent) => {
     if (e.button === 2) return; // ignore right-click
 
+    // Apple Pencil Double Tap
+    if (detectPencilDoubleTap(e)) {
+      setTool(tool === ShapeType.FREEHAND ? 'eraser' : ShapeType.FREEHAND);
+      return;
+    }
+
+    // Tablet Palm Rejection and Gestures
+    const nativeEvent = e.nativeEvent;
+    const result = gestureHandler.onPointerDown(nativeEvent);
+
+    if (result === 'reject') {
+      rejectedPointers.current.add(e.pointerId);
+      return;
+    }
+
+    if (result === 'gesture') {
+      // Two-finger gesture starting — cancel any active drawing stroke
+      if (modeRef.current === 'drawing') {
+        const lastEl = elements[currentElementRef.current?.id || ''];
+        if (lastEl) deleteElements([lastEl.id]);
+      }
+      setMode('panning');
+      return;
+    }
+
+    // Update Input State
+    setInputState({
+      activePointerType: e.pointerType as any,
+      lastPressure: e.pressure,
+    });
+
     // Close text editing
     if (textEditingId && modeRef.current === 'text-editing') {
       commitTextEdit();
@@ -409,159 +454,77 @@ export function Canvas() {
       return;
     }
 
-    // Select tool
-    if (tool === 'select') {
-      const selectedArray = getSelectedElements();
+    // ─── UNIVERSAL CLICK-TO-SELECT ───────────────────────────────────────
+    const isActiveDraw = modeRef.current === 'drawing' || modeRef.current === 'connector-draw';
 
-      // ── 1. Check resize / rotate handles on currently selected element ──────
-      if (selectedArray.length === 1) {
-        const el = selectedArray[0]!;
+    if (!isActiveDraw) {
+      const connectorHandleHit = hitTestConnectorHandles(world.x, world.y, elements, Array.from(selectedIds), viewport.zoom);
 
-        if (el.type === ShapeType.CONNECTOR) {
-          const manager = new ConnectorManager();
-          const conn = el as ConnectorElement;
-          const handleRad = 12 / viewport.zoom;
-          const dist = (p1: Point, p2: Point) => Math.hypot(p1.x - p2.x, p1.y - p2.y);
-
-          const resolved = manager.resolveConnectorEndpoints(conn, useCanvasStore.getState().getElementsMap());
-
-          if (dist(world, { x: resolved.endX, y: resolved.endY }) < handleRad) {
-            connectorEndpointRef.current = 'end';
-            resizeElementIdRef.current = el.id;
-            setMode('connector-endpoint-drag');
-            return;
-          }
-          if (dist(world, { x: resolved.startX, y: resolved.startY }) < handleRad) {
-            connectorEndpointRef.current = 'start';
-            resizeElementIdRef.current = el.id;
-            setMode('connector-endpoint-drag');
-            return;
-          }
-
-          const mid = manager.getPointOnCurve(0.5, resolved.startX, resolved.startY, resolved.endX, resolved.endY, conn.controlPoints);
-          if (dist(world, mid) < handleRad) {
-            connectorHandleIndexRef.current = -1;
-            resizeElementIdRef.current = el.id;
-            setMode('connector-reshaping');
-            return;
-          }
-
-          if (conn.isManuallyRouted && conn.controlPoints) {
-            if (conn.controlPoints[0] && dist(world, conn.controlPoints[0]) < handleRad) {
-              connectorHandleIndexRef.current = 0;
-              resizeElementIdRef.current = el.id;
-              setMode('connector-reshaping');
-              return;
-            }
-            if (conn.controlPoints[1] && dist(world, conn.controlPoints[1]) < handleRad) {
-              connectorHandleIndexRef.current = 1;
-              resizeElementIdRef.current = el.id;
-              setMode('connector-reshaping');
-              return;
-            }
-          }
+      if (connectorHandleHit) {
+        setMode('connector-reshaping');
+        useCanvasStore.getState().setActiveHandle(connectorHandleHit);
+        resizeElementIdRef.current = connectorHandleHit.connectorId;
+        
+        if (connectorHandleHit.handleType === 'control-point') {
+           connectorHandleIndexRef.current = connectorHandleHit.controlPointIndex ?? 0;
+        } else if (connectorHandleHit.handleType === 'midpoint') {
+           connectorHandleIndexRef.current = -1;
         } else {
-          const handle = getHandleAtPoint(world, el, viewport.zoom);
-          if (handle) {
-            if (handle === ResizeHandle.ROTATION) {
-              const cx = el.x + el.width / 2;
-              const cy = el.y + el.height / 2;
-              rotateCenter.current = { x: cx, y: cy };
-              rotateStartAngle.current = Math.atan2(world.y - cy, world.x - cx) - (el.rotation || 0);
-              rotateElementIdRef.current = el.id;
-              setMode('rotating');
-            } else {
-              resizeHandleRef.current = handle;
-              resizeStartBounds.current = { x: el.x, y: el.y, width: el.width, height: el.height };
-              resizeElementIdRef.current = el.id;
-              setMode('resizing');
-            }
-            return;
-          }
+           setMode('connector-endpoint-drag');
+           connectorEndpointRef.current = connectorHandleHit.handleType === 'start-endpoint' ? 'start' : 'end';
         }
+        return;
       }
 
-      // ── 2. Hit test: find topmost element at click point ─────────────────
-      const hitEl = getTopElementAtPoint(elements, world, viewport.zoom);
-      const hitId = hitEl?.id ?? null;
+      const hit = hitTestPoint(world.x, world.y, elements, viewport);
 
-      if (hitId) {
-        const hitElement = elements[hitId];
-        if (hitElement && hitElement.type === ShapeType.CONNECTOR) {
-          const manager = new ConnectorManager();
-          const conn = hitElement as ConnectorElement;
-          const handleRad = 15 / viewport.zoom;
-          const dist = (p1: Point, p2: Point) => Math.hypot(p1.x - p2.x, p1.y - p2.y);
-          const resolved = manager.resolveConnectorEndpoints(conn, useCanvasStore.getState().getElementsMap());
-
-          if (dist(world, { x: resolved.endX, y: resolved.endY }) < handleRad) {
-            if (!selectedIds.has(hitId)) selectElements([hitId]);
-            connectorEndpointRef.current = 'end';
-            resizeElementIdRef.current = hitId;
-            setMode('connector-endpoint-drag');
-            return;
-          }
-          if (dist(world, { x: resolved.startX, y: resolved.startY }) < handleRad) {
-            if (!selectedIds.has(hitId)) selectElements([hitId]);
-            connectorEndpointRef.current = 'start';
-            resizeElementIdRef.current = hitId;
-            setMode('connector-endpoint-drag');
-            return;
-          }
-        }
-
-        const graph = buildConnectionGraph(elements);
-        const componentIds = findConnectedComponent(hitId, graph);
-
+      if (hit) {
+        const isAlreadySelected = selectedIds.has(hit.elementId);
+        
+        // Select logic
         if (e.shiftKey) {
-          // Shift-click: toggle element and its component in selection
           const newSet = new Set(selectedIds);
-          let allSelected = true;
-          componentIds.forEach(id => { if (!newSet.has(id)) allSelected = false; });
-          
-          if (allSelected) {
-            componentIds.forEach(id => newSet.delete(id));
+          if (newSet.has(hit.elementId)) {
+            newSet.delete(hit.elementId);
           } else {
-            componentIds.forEach(id => newSet.add(id));
+            newSet.add(hit.elementId);
           }
           selectElements(Array.from(newSet));
-          
-          // Setup drag for the full new selection
-          dragStartElementPositions.current = {};
-          Array.from(newSet).forEach(id => {
-            const el = elements[id];
-            if (el) dragStartElementPositions.current[id] = { x: el.x, y: el.y };
-          });
-        } else {
-          // Normal click
-          if (!selectedIds.has(hitId)) {
-            // Select this entire connected component
-            selectElements(Array.from(componentIds));
-            
-            // Setup drag for the newly selected component
-            dragStartElementPositions.current = {};
-            componentIds.forEach(id => {
-              const el = elements[id];
-              if (el) dragStartElementPositions.current[id] = { x: el.x, y: el.y };
-            });
-          } else {
-            // Already selected, prep all selected for dragging
-            dragStartElementPositions.current = {};
-            selectedIds.forEach(id => {
-              const el = elements[id];
-              if (el) dragStartElementPositions.current[id] = { x: el.x, y: el.y };
-            });
-          }
+        } else if (!isAlreadySelected) {
+          selectElements([hit.elementId]);
         }
-        setMode('dragging');
+
+        // Setup drag start positions
+        dragStartElementPositions.current = {};
+        useCanvasStore.getState().selectedIds.forEach(id => {
+          const el = elements[id];
+          if (el) dragStartElementPositions.current[id] = { x: el.x, y: el.y };
+        });
+
+        // Enter drag mode if using select tool
+        if (tool === 'select') {
+           setMode('dragging');
+           return;
+        } else if (tool === ShapeType.CONNECTOR || tool === ShapeType.ARROW) {
+           // Connectors must be allowed to start on existing elements!
+           // Fall through to the connector drawing logic below.
+        } else {
+           // We clicked an element while holding a shape tool. We just selected it, but we don't start drawing.
+           return;
+        }
       } else {
-        // ── 3. Click on empty canvas: start rubber-band selection ───────────
-        if (!e.shiftKey) clearSelection();
-        setSelectionBox({ start: world, end: world });
-        setMode('selecting');
+        // Clicked empty space
+        if (tool === 'select') {
+          if (!e.shiftKey) clearSelection();
+          setSelectionBox({ start: world, end: world });
+          setMode('selecting');
+          return;
+        } else {
+          if (!e.shiftKey) clearSelection();
+        }
       }
-      return;
     }
+    // ─── END UNIVERSAL CLICK-TO-SELECT ───────────────────────────────────
 
     // Freehand drawing
     if (tool === ShapeType.FREEHAND) {
@@ -643,10 +606,46 @@ export function Canvas() {
   };
 
   const handlePointerMove = (e: React.PointerEvent) => {
+    const nativeEvent = e.nativeEvent;
+
+    // Skip rejected (palm) pointers
+    if (rejectedPointers.current.has(e.pointerId)) return;
+
+    // Handle two-finger gestures
+    const wasGesture = gestureHandler.onPointerMove(
+      nativeEvent,
+      (scale, cx, cy) => {
+        // Pinch zoom
+        const vp = useCanvasStore.getState().viewport;
+        const s = Math.max(0.1, Math.min(vp.zoom * scale, 5));
+        const newX = cx - (cx - vp.x) * (s / vp.zoom);
+        const newY = cy - (cy - vp.y) * (s / vp.zoom);
+        useCanvasStore.getState().updateViewport({ zoom: s, x: newX, y: newY });
+      },
+      (dx, dy) => {
+        // Two-finger pan
+        const vp = useCanvasStore.getState().viewport;
+        useCanvasStore.getState().updateViewport({ x: vp.x + dx, y: vp.y + dy });
+      }
+    );
+
+    if (wasGesture) return; // Don't process drawing/panning during gesture
+
     const screen: Point = { x: e.clientX, y: e.clientY };
     const world = screenToWorld(e.clientX, e.clientY);
     const dx = screen.x - lastPointerPos.current.x;
     const dy = screen.y - lastPointerPos.current.y;
+
+    if (modeRef.current === 'idle' || modeRef.current === 'resizing') {
+      const hoverHit = hitTestConnectorHandles(world.x, world.y, elements, Array.from(selectedIds), viewport.zoom);
+      if (containerRef.current) {
+        if (hoverHit) {
+          containerRef.current.style.cursor = hoverHit.handleType === 'midpoint' ? 'grab' : 'crosshair';
+        } else {
+          containerRef.current.style.cursor = ''; // Let React handle it
+        }
+      }
+    }
 
     switch (modeRef.current) {
       case 'panning': {
@@ -693,10 +692,44 @@ export function Canvas() {
         const wdx = world.x - prevWorld.x;
         const wdy = world.y - prevWorld.y;
 
+        if (elId === 'group') {
+          const gb = activeGroupBounds.current;
+          const startGb = resizeGroupStartBounds.current;
+          if (!gb || !startGb) break;
+
+          const preserveRatio = e.shiftKey;
+          const newGb = calcResizedBounds(handle, gb.x, gb.y, gb.width, gb.height, wdx, wdy, preserveRatio);
+          activeGroupBounds.current = newGb;
+
+          const scaleX = startGb.width === 0 ? 1 : newGb.width / startGb.width;
+          const scaleY = startGb.height === 0 ? 1 : newGb.height / startGb.height;
+
+          const movedIds: string[] = [];
+          Object.entries(resizeElementStartBoundsRef.current).forEach(([id, startEl]) => {
+            const newX = newGb.x + (startEl.x - startGb.x) * scaleX;
+            const newY = newGb.y + (startEl.y - startGb.y) * scaleY;
+            const newW = startEl.width * scaleX;
+            const newH = startEl.height * scaleY;
+            const updates: any = { x: newX, y: newY, width: newW, height: newH };
+            
+            if (startEl.type === ShapeType.CONNECTOR && startEl.controlPoints) {
+              updates.controlPoints = startEl.controlPoints.map((cp: Point) => ({
+                x: newGb.x + (cp.x - startGb.x) * scaleX,
+                y: newGb.y + (cp.y - startGb.y) * scaleY,
+              }));
+            }
+            updateElement(id, updates);
+            movedIds.push(id);
+          });
+
+          useCanvasStore.getState().updateAttachedConnectors(movedIds, useCanvasStore.getState().getElementsMap());
+          break;
+        }
+
         const el = useCanvasStore.getState().elements[elId];
         if (!el) break;
 
-        const preserveRatio = e.shiftKey || (el.type === ShapeType.IMAGE && (el as ImageElement).lockAspectRatio);
+        const preserveRatio = e.shiftKey || (el.type === ShapeType.IMAGE && (el as ImageElement).lockAspectRatio) || el.type === ShapeType.ICON;
         const newBounds = calcResizedBounds(handle, el.x, el.y, el.width, el.height, wdx, wdy, preserveRatio);
         updateElement(elId, newBounds);
         break;
@@ -719,13 +752,19 @@ export function Canvas() {
       case 'freehand': {
         if (!currentElementRef.current) break;
         const el = currentElementRef.current as FreehandElement;
-        const pressure = e.pressure > 0 ? e.pressure : 0.5;
-        const newPoint: [number, number, number] = [world.x, world.y, pressure];
+        
+        const coalescedPoints = extractAllCoalescedPoints(nativeEvent, canvasRef.current!, useCanvasStore.getState().viewport);
         const existingPoints = el.points.map(
           ([x, y, p]) => [x, y, p ?? 0.5] as [number, number, number]
         );
-        const newPoints = [...existingPoints, newPoint];
-        updateElement(el.id, { points: newPoints });
+        
+        const addedPoints = coalescedPoints.map(p => [p.x, p.y, p.pressure] as [number, number, number]);
+        const newPoints = [...existingPoints, ...addedPoints];
+        
+        updateElement(el.id, { 
+          points: newPoints,
+          simulatePressure: e.pointerType === 'mouse' // REAL pressure for pen/touch!
+        });
         currentElementRef.current = { ...el, points: newPoints };
         break;
       }
@@ -815,21 +854,57 @@ export function Canvas() {
         const el = useCanvasStore.getState().elements[elId] as ConnectorElement;
         if (!el) break;
         
-        const wdx = world.x - lastPointerWorldPos.current!.x;
-        const wdy = world.y - lastPointerWorldPos.current!.y;
+        const manager = new ConnectorManager();
+        let newCp = el.controlPoints ? [...el.controlPoints] : [];
         
-        const newCp = el.controlPoints ? [...el.controlPoints] : [];
         if (hIdx === -1) {
-           // Move both control points if midpoint
-           if (newCp[0]) { newCp[0].x += wdx; newCp[0].y += wdy; }
-           if (newCp[1]) { newCp[1].x += wdx; newCp[1].y += wdy; }
-        } else if (hIdx === 0 && newCp[0]) {
-           newCp[0].x += wdx; newCp[0].y += wdy;
-        } else if (hIdx === 1 && newCp[1]) {
-           newCp[1].x += wdx; newCp[1].y += wdy;
+            const resolved = manager.resolveConnectorEndpoints(el, useCanvasStore.getState().getElementsMap());
+            const { startX, startY, endX, endY } = resolved;
+            
+            // Re-import to avoid conflict? It's exported from connectors.ts
+            // But I didn't import reshapeConnectorFromMidpoint in Canvas.tsx! 
+            // Wait, connectorManager can just expose it or I can import it.
+            // Wait, we can just do the math inline here or import it.
+            // Oh, I can just do the math inline:
+            const cpX = (4 * world.x - startX - endX) / 2;
+            const cpY = (4 * world.y - startY - endY) / 2;
+            const tangentX = (endX - startX) * 0.1;
+            const tangentY = (endY - startY) * 0.1;
+            
+            newCp = [
+              { x: cpX - tangentX, y: cpY - tangentY },
+              { x: cpX + tangentX, y: cpY + tangentY }
+            ];
+        } else {
+            const wdx = world.x - lastPointerWorldPos.current!.x;
+            const wdy = world.y - lastPointerWorldPos.current!.y;
+            
+            if (newCp.length === 0) {
+              const path = manager.computeConnectorPath(el, useCanvasStore.getState().getElementsMap());
+              if (path.controlPoints && path.controlPoints.length >= 2) {
+                newCp = [...path.controlPoints];
+              } else {
+                const resolved = manager.resolveConnectorEndpoints(el, useCanvasStore.getState().getElementsMap());
+                const { startX, startY, endX, endY } = resolved;
+                newCp = [
+                  { x: startX + (endX - startX) / 3, y: startY + (endY - startY) / 3 },
+                  { x: startX + 2 * (endX - startX) / 3, y: startY + 2 * (endY - startY) / 3 }
+                ];
+              }
+            }
+
+            if (hIdx === 0 && newCp[0]) {
+               newCp[0].x += wdx; newCp[0].y += wdy;
+            } else if (hIdx === 1 && newCp[1]) {
+               newCp[1].x += wdx; newCp[1].y += wdy;
+            }
         }
         
-        updateElement(elId, { controlPoints: newCp, isManuallyRouted: true });
+        updateElement(elId, { 
+          controlPoints: newCp, 
+          isManuallyRouted: true,
+          routingMode: (!el.routingMode || el.routingMode === 'straight') ? 'curved' : el.routingMode
+        });
         break;
       }
 
@@ -859,7 +934,10 @@ export function Canvas() {
   };
 
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  const handlePointerUp = (_e: React.PointerEvent) => {
+  const handlePointerUp = (e: React.PointerEvent) => {
+    rejectedPointers.current.delete(e.pointerId);
+    gestureHandler.onPointerUp(e.nativeEvent);
+
     const prevMode = modeRef.current;
 
     if (prevMode === 'selecting') {
@@ -945,6 +1023,9 @@ export function Canvas() {
       saveSnapshot();
       resizeHandleRef.current = null;
       resizeStartBounds.current = null;
+      resizeGroupStartBounds.current = null;
+      activeGroupBounds.current = null;
+      resizeElementStartBoundsRef.current = {};
       resizeElementIdRef.current = null;
       rotateElementIdRef.current = null;
     }
@@ -1020,14 +1101,12 @@ export function Canvas() {
       
       if (selectedArray.length === 1 && selectedArray[0].type === ShapeType.CONNECTOR) {
          const conn = selectedArray[0] as ConnectorElement;
-         const manager = new ConnectorManager();
-         const mid = manager.getPointOnCurve(0.5, conn.startX, conn.startY, conn.endX, conn.endY, conn.controlPoints);
-         if (Math.hypot(world.x - mid.x, world.y - mid.y) < 8 / viewport.zoom) {
-            useCanvasStore.getState().setConnectorRoutingMode(conn.id, conn.routingMode || 'curved');
-            manager.computeConnectorPath(conn, elements);
-            updateElement(conn.id, { controlPoints: conn.controlPoints });
-            saveSnapshot();
-            return;
+         const handleHit = hitTestConnectorHandles(world.x, world.y, elements, [conn.id], viewport.zoom);
+         
+         if (handleHit?.handleType === 'midpoint') {
+             useCanvasStore.getState().setActiveHandle(null);
+             updateElement(conn.id, { isManuallyRouted: false, controlPoints: undefined, routingMode: 'curved' });
+             return;
          }
       }
 
@@ -1044,14 +1123,36 @@ export function Canvas() {
   };
 
   // --- Text editing helpers ---
-  const openTextEditor = (el: TextElement) => {
+  const openTextEditor = (el: TextElement | ConnectorElement) => {
     setTextEditingId(el.id);
     setMode('text-editing');
 
-    const screenX = el.x * viewport.zoom + viewport.x;
-    const screenY = el.y * viewport.zoom + viewport.y;
-    const screenW = Math.max(el.width * viewport.zoom, 100);
-    const screenH = Math.max(el.height * viewport.zoom, 40);
+    let screenX, screenY, screenW, screenH, fontSize, fontFamily, color, text;
+
+    if (el.type === ShapeType.TEXT) {
+      screenX = el.x * viewport.zoom + viewport.x;
+      screenY = el.y * viewport.zoom + viewport.y;
+      screenW = Math.max(el.width * viewport.zoom, 100);
+      screenH = Math.max(el.height * viewport.zoom, 40);
+      fontSize = el.fontSize || 18;
+      fontFamily = el.fontFamily || 'Inter, sans-serif';
+      color = el.color || el.style.stroke;
+      text = el.text;
+    } else if (el.type === ShapeType.CONNECTOR) {
+      const manager = new ConnectorManager();
+      const resolved = manager.resolveConnectorEndpoints(el, useCanvasStore.getState().getElementsMap());
+      const mid = manager.getPointOnCurve(0.5, resolved.startX, resolved.startY, resolved.endX, resolved.endY, el.controlPoints);
+      screenX = mid.x * viewport.zoom + viewport.x - 50; // offset for centering roughly
+      screenY = mid.y * viewport.zoom + viewport.y - 20;
+      screenW = 100;
+      screenH = 40;
+      fontSize = 18;
+      fontFamily = 'Inter, sans-serif';
+      color = el.style.stroke;
+      text = el.label || '';
+    } else {
+      return;
+    }
 
     setTextEditorStyle({
       position: 'fixed',
@@ -1059,9 +1160,9 @@ export function Canvas() {
       top: screenY,
       width: screenW,
       minHeight: screenH,
-      fontSize: (el.fontSize || 18) * viewport.zoom,
-      fontFamily: el.fontFamily || 'Inter, sans-serif',
-      color: el.color || el.style.stroke,
+      fontSize: fontSize * viewport.zoom,
+      fontFamily: fontFamily,
+      color: color,
       background: 'transparent',
       border: '2px solid var(--foreground)',
       outline: 'none',
@@ -1074,7 +1175,7 @@ export function Canvas() {
 
     setTimeout(() => {
       if (textAreaRef.current) {
-        textAreaRef.current.value = el.type === ShapeType.TEXT ? el.text : '';
+        textAreaRef.current.value = text;
         textAreaRef.current.focus();
         textAreaRef.current.select();
       }
@@ -1083,12 +1184,23 @@ export function Canvas() {
 
   const commitTextEdit = () => {
     if (!textEditingId || !textAreaRef.current) return;
-    const text = textAreaRef.current.value;
-    if (text.trim() === '') {
-      deleteElements([textEditingId]);
-    } else {
-      updateElement(textEditingId, { text, width: Math.max(200, text.length * 10), height: 40 });
+    const textValue = textAreaRef.current.value;
+    const el = elements[textEditingId];
+    if (!el) {
+      setTextEditingId(null);
+      return;
+    }
+    
+    if (el.type === ShapeType.CONNECTOR) {
+      updateElement(textEditingId, { label: textValue });
       saveSnapshot();
+    } else {
+      if (textValue.trim() === '') {
+        deleteElements([textEditingId]);
+      } else {
+        updateElement(textEditingId, { text: textValue, width: Math.max(200, textValue.length * 10), height: 40 });
+        saveSnapshot();
+      }
     }
     setTextEditingId(null);
     setMode('idle');
@@ -1137,11 +1249,13 @@ export function Canvas() {
     const selectedArray = Array.from(selectedIds).map(id => elements[id]).filter(Boolean) as WhiteboardElement[];
     if (selectedArray.length === 1) {
       const el = selectedArray[0]!;
-      activeSelectionBox = {
-        box: { minX: el.x, minY: el.y, maxX: el.x + el.width, maxY: el.y + el.height },
-        rotation: el.rotation || 0,
-        isMultiple: false,
-      };
+      if (el.type !== ShapeType.CONNECTOR) {
+        activeSelectionBox = {
+          box: { minX: el.x, minY: el.y, maxX: el.x + el.width, maxY: el.y + el.height },
+          rotation: el.rotation || 0,
+          isMultiple: false,
+        };
+      }
     } else if (selectedArray.length > 1) {
       let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
       selectedArray.forEach(el => {
@@ -1224,8 +1338,15 @@ export function Canvas() {
         ref={canvasRef}
         onPointerDown={handlePointerDown}
         onDoubleClick={handleDoubleClick}
+        onPointerCancel={handlePointerUp}
         className="absolute inset-0"
-        style={{ touchAction: 'none' }}
+        style={{
+          touchAction: 'none',
+          WebkitUserSelect: 'none',
+          userSelect: 'none',
+          WebkitTouchCallout: 'none',
+          cursor: 'crosshair',
+        }}
       />
 
       {/* Selection box overlay */}
@@ -1240,11 +1361,38 @@ export function Canvas() {
             // Capture pointer on the container so move/up events keep firing
             // even if the pointer leaves the window during a drag.
             containerRef.current?.setPointerCapture(e.pointerId);
-            const el = getSelectedElements()[0];
-            if (!el) return;
+            const selectedArray = getSelectedElements();
+            if (selectedArray.length === 0) return;
             resizeHandleRef.current = handle;
-            resizeStartBounds.current = { x: el.x, y: el.y, width: el.width, height: el.height };
-            resizeElementIdRef.current = el.id;
+            
+            if (selectedArray.length === 1) {
+              const el = selectedArray[0]!;
+              resizeStartBounds.current = { x: el.x, y: el.y, width: el.width, height: el.height };
+              resizeElementIdRef.current = el.id;
+            } else {
+              resizeElementIdRef.current = 'group';
+              let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+              const startBounds: Record<string, any> = {};
+              selectedArray.forEach(el => {
+                minX = Math.min(minX, el.x);
+                minY = Math.min(minY, el.y);
+                maxX = Math.max(maxX, el.x + el.width);
+                maxY = Math.max(maxY, el.y + el.height);
+                startBounds[el.id] = { 
+                  x: el.x, 
+                  y: el.y, 
+                  width: el.width, 
+                  height: el.height, 
+                  type: el.type, 
+                  controlPoints: el.type === ShapeType.CONNECTOR ? (el as any).controlPoints : undefined 
+                };
+              });
+              const gb = { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
+              resizeGroupStartBounds.current = gb;
+              activeGroupBounds.current = { ...gb };
+              resizeElementStartBoundsRef.current = startBounds;
+            }
+            
             lastPointerPos.current = { x: e.clientX, y: e.clientY };
             setMode('resizing');
           }}
@@ -1265,6 +1413,15 @@ export function Canvas() {
           }}
         />
       )}
+
+      <PenCursor 
+        canvasRef={canvasRef} 
+        activeTool={tool} 
+        color={currentStyle.stroke} 
+        strokeSize={currentStyle.strokeWidth} 
+      />
+
+      <IconPicker />
 
       {/* Inline text editor */}
       {textEditingId && (

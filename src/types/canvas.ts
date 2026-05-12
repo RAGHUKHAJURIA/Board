@@ -13,6 +13,7 @@ export enum ShapeType {
   TEXT = 'text',
   IMAGE = 'image',
   CONNECTOR = 'connector',
+  ICON = 'icon',
 }
 
 export type Tool =
@@ -102,7 +103,14 @@ export interface ConnectorElement extends BaseElement {
   endOffsetFromCenter?: { x: number; y: number };
 }
 
-export type WhiteboardElement = ShapeElement | FreehandElement | TextElement | ImageElement | ConnectorElement;
+export interface IconElement extends BaseElement {
+  type: ShapeType.ICON;
+  iconName: string;
+  iconLibrary: 'lucide' | 'tabler';
+  color: string;
+}
+
+export type WhiteboardElement = ShapeElement | FreehandElement | TextElement | ImageElement | ConnectorElement | IconElement;
 
 export interface Viewport {
   x: number;

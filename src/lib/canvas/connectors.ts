@@ -348,6 +348,36 @@ export class ConnectorManager {
       ctx.setLineDash([]); // Reset
     }
   
+    // Draw label
+    if (connector.label) {
+      let mid = { x: (startX + endX) / 2, y: (startY + endY) / 2 };
+      if (mode === 'curved' && controlPoints && controlPoints.length >= 2) {
+        mid = this.getPointOnCurve(0.5, startX, startY, endX, endY, controlPoints);
+      } else if (mode === 'orthogonal' && controlPoints && controlPoints.length >= 2) {
+        mid = {
+          x: (controlPoints[0].x + controlPoints[1].x) / 2,
+          y: (controlPoints[0].y + controlPoints[1].y) / 2
+        };
+      }
+      
+      ctx.font = '18px Inter, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      
+      // Draw a subtle background for the text
+      const metrics = ctx.measureText(connector.label);
+      const padding = 4;
+      const bgW = metrics.width + padding * 2;
+      const bgH = 18 + padding * 2;
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.7)'; // fallback background
+      ctx.globalCompositeOperation = 'destination-out';
+      ctx.fillRect(mid.x - bgW / 2, mid.y - bgH / 2, bgW, bgH);
+      ctx.globalCompositeOperation = 'source-over';
+      
+      ctx.fillStyle = style.stroke || '#ffffff';
+      ctx.fillText(connector.label, mid.x, mid.y);
+    }
+  
     // Draw arrowhead — use tangent at end of curve for correct angle
     const tangent = this.getTangentAtEnd(path);
     this.drawArrowhead(ctx, endX, endY, tangent, connector);
@@ -431,4 +461,96 @@ export class ConnectorManager {
     ctx.stroke();
     ctx.restore();
   }
+}
+
+export function getConnectorMidpoint(el: ConnectorElement): { x: number; y: number } {
+  const cp = el.controlPoints;
+
+  if (!cp || cp.length === 0 || el.routingMode === 'straight') {
+    return {
+      x: (el.startX + el.endX) / 2,
+      y: (el.startY + el.endY) / 2,
+    };
+  }
+
+  const t = 0.5;
+  const mt = 1 - t;
+
+  if (cp.length === 2) {
+    return {
+      x: mt ** 3 * el.startX + 3 * mt ** 2 * t * cp[0].x + 3 * mt * t ** 2 * cp[1].x + t ** 3 * el.endX,
+      y: mt ** 3 * el.startY + 3 * mt ** 2 * t * cp[0].y + 3 * mt * t ** 2 * cp[1].y + t ** 3 * el.endY,
+    };
+  }
+
+  if (cp.length === 1) {
+    return {
+      x: mt ** 2 * el.startX + 2 * mt * t * cp[0].x + t ** 2 * el.endX,
+      y: mt ** 2 * el.startY + 2 * mt * t * cp[0].y + t ** 2 * el.endY,
+    };
+  }
+
+  return getOrthogonalMidpoint(el);
+}
+
+function getOrthogonalMidpoint(el: ConnectorElement): { x: number; y: number } {
+  const cp = el.controlPoints ?? [];
+  const allPoints = [
+    { x: el.startX, y: el.startY },
+    ...cp,
+    { x: el.endX, y: el.endY },
+  ];
+
+  let totalLength = 0;
+  const segments: number[] = [];
+  for (let i = 0; i < allPoints.length - 1; i++) {
+    const len = Math.hypot(
+      allPoints[i + 1].x - allPoints[i].x,
+      allPoints[i + 1].y - allPoints[i].y
+    );
+    segments.push(len);
+    totalLength += len;
+  }
+
+  let walked = 0;
+  const target = totalLength / 2;
+  for (let i = 0; i < segments.length; i++) {
+    if (walked + segments[i] >= target) {
+      const t = segments[i] === 0 ? 0 : (target - walked) / segments[i];
+      return {
+        x: allPoints[i].x + t * (allPoints[i + 1].x - allPoints[i].x),
+        y: allPoints[i].y + t * (allPoints[i + 1].y - allPoints[i].y),
+      };
+    }
+    walked += segments[i];
+  }
+
+  return { x: (el.startX + el.endX) / 2, y: (el.startY + el.endY) / 2 };
+}
+
+export function reshapeConnectorFromMidpoint(
+  sx: number, sy: number, ex: number, ey: number,
+  newMidX: number,
+  newMidY: number
+): { controlPoints: { x: number; y: number }[] } {
+  const cpX = (4 * newMidX - sx - ex) / 2;
+  const cpY = (4 * newMidY - sy - ey) / 2;
+
+  const tangentX = (ex - sx) * 0.1;
+  const tangentY = (ey - sy) * 0.1;
+
+  return {
+    controlPoints: [
+      { x: cpX - tangentX, y: cpY - tangentY },
+      { x: cpX + tangentX, y: cpY + tangentY },
+    ],
+  };
+}
+
+export function reshapeOrthogonalFromMidpoint(
+  sx: number, sy: number, ex: number, ey: number,
+  newMidX: number,
+  newMidY: number
+): { controlPoints: { x: number; y: number }[] } {
+  return reshapeConnectorFromMidpoint(sx, sy, ex, ey, newMidX, newMidY);
 }

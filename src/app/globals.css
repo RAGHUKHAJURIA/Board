@@ -87,9 +87,14 @@
   }
   body {
     @apply bg-background text-foreground;
+    overscroll-behavior: none;
+    -webkit-user-select: none;
+    user-select: none;
   }
   html {
     @apply font-sans;
+    overscroll-behavior: none;
+    touch-action: none;
   }
 }
 
