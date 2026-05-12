@@ -200,8 +200,8 @@ export function hitTestPoint(
       case 'star':
       case 'hexagon':
       case 'image':
-      case 'icon':      hit = hitTestBoundingBox(lx, ly, el as any, tol); break;
-      default:          hit = hitTestBoundingBox(lx, ly, el as any, tol); break;
+      case 'icon':      hit = hitTestBoundingBox(lx, ly, el, tol); break;
+      default:          hit = hitTestBoundingBox(lx, ly, el, tol); break;
     }
 
     if (hit) {

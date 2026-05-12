@@ -4,7 +4,7 @@ import type { IconMeta } from './types';
 export function searchIcons(query: string, category: string = 'All', limit = 120): IconMeta[] {
   const q = query.toLowerCase().trim();
 
-  let pool = category === 'All'
+  const pool = category === 'All'
     ? ICON_REGISTRY
     : ICON_REGISTRY.filter(icon => icon.category === category);
 

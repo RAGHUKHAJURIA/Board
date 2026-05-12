@@ -79,12 +79,12 @@ export function IconPicker() {
           {results.length === 0 ? (
             <div className="h-full flex flex-col items-center justify-center text-slate-500">
               <Search className="w-12 h-12 mb-4 opacity-20" />
-              <p>No icons found for "{query}"</p>
+              <p>No icons found for &quot;{query}&quot;</p>
             </div>
           ) : (
             <div className="grid grid-cols-4 sm:grid-cols-6 md:grid-cols-8 gap-3">
               {results.map((meta) => {
-                const IconComponent = (LucideIcons as any)[meta.name];
+                const IconComponent = (LucideIcons as unknown as Record<string, React.ElementType>)[meta.name];
                 if (!IconComponent) return null;
 
                 return (

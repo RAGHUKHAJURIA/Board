@@ -1,6 +1,6 @@
 export type StylusAction = 'switch-tool' | 'undo' | 'open-color';
 
-export function handleStylusBarrelButton(e: PointerEvent | React.PointerEvent, currentTool: string): StylusAction | null {
+export function handleStylusBarrelButton(e: PointerEvent | React.PointerEvent): StylusAction | null {
   const nativeEvent = 'nativeEvent' in e ? e.nativeEvent : e;
   // barrel button = tangentialPressure spike or button flags
   // Different styli report this differently:

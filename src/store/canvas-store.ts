@@ -199,7 +199,7 @@ export const useCanvasStore = create<CanvasState>()(
 
     addIconElement: (iconName, iconLibrary) => {
       const { viewport } = get();
-      const currentStyle = (useUIStore as any).getState?.()?.currentStyle || { stroke: '#e2e8f0', strokeWidth: 2 };
+      const currentStyle = (useUIStore as { getState?: () => { currentStyle: { stroke: string; strokeWidth: number } } }).getState?.()?.currentStyle || { stroke: '#e2e8f0', strokeWidth: 2 };
       
       // Place at center of current viewport in world coordinates
       const worldX = (-viewport.x + window.innerWidth / 2) / viewport.zoom - 24;
@@ -229,7 +229,7 @@ export const useCanvasStore = create<CanvasState>()(
         iconName,
         iconLibrary,
         color: currentStyle.stroke,
-      } as any; // Cast as any because IconElement imports might be tricky without adding it to types
+      } as IconElement;
 
       element.bbox = getElementBBox(element);
 

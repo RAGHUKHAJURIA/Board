@@ -263,6 +263,9 @@ export function AdvancedToolbar() {
 
   const isVertical = orientation === 'vertical';
 
+  const isIconPickerOpen = useCanvasStore((state) => state.iconPickerOpen);
+  const setIconPickerOpen = useCanvasStore((state) => state.setIconPickerOpen);
+
   /* ── Shared button renderer ───────────────────────────────── */
   const renderToolButton = (t: { id: string; icon: React.ElementType; label: string } | null, i: number) => {
     if (!t) {
@@ -272,8 +275,6 @@ export function AdvancedToolbar() {
     }
 
     const Icon = t.icon;
-    const isIconPickerOpen = useCanvasStore((state) => state.iconPickerOpen);
-    const setIconPickerOpen = useCanvasStore((state) => state.setIconPickerOpen);
     
     // For icon picker, it's not a persistent "tool" in the same way, but it behaves like an open modal
     const isActive = t.id === 'icon-picker' ? isIconPickerOpen : tool === t.id;

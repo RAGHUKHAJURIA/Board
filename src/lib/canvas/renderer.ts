@@ -92,7 +92,7 @@ export const renderCanvas = (
         drawConnectorHandles(ctx, element as ConnectorElement, viewport.zoom);
       }
     } else if (element.type === ShapeType.ICON) {
-      const iconEl = element as any;
+      const iconEl = element as import('@/types').IconElement;
       const bitmap = getIconBitmapSync(iconEl);
       if (bitmap) {
         drawIconElement(ctx, iconEl, bitmap);
