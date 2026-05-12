@@ -16,12 +16,11 @@ import { ImageHandler } from '@/lib/canvas/image-handler';
 import { EraserManager } from '@/lib/canvas/eraser-manager';
 import { ConnectorManager } from '@/lib/canvas/connectors';
 import { debounce } from '@/lib/utils/debounce';
-import { getTopElementAtPoint, getElementsInSelectionBox } from '@/lib/canvas/hit-test';
+import { getElementsInSelectionBox } from '@/lib/canvas/hit-test';
 import { hitTestPoint, hitTestConnectorHandles } from '@/lib/canvas/hit-testing';
-import { extractStylusPoint, extractAllCoalescedPoints } from '@/lib/input/pointer-utils';
-import { palmRejection } from '@/lib/input/palm-rejection';
+import { extractAllCoalescedPoints } from '@/lib/input/pointer-utils';
 import { gestureHandler } from '@/lib/input/gesture-handler';
-import { handleStylusBarrelButton, detectPencilDoubleTap } from '@/lib/input/stylus-buttons';
+import { detectPencilDoubleTap } from '@/lib/input/stylus-buttons';
 import { PenCursor } from './PenCursor';
 
 type InteractionMode =
@@ -89,7 +88,7 @@ export function Canvas() {
   const resizeStartBounds = useRef<{ x: number; y: number; width: number; height: number } | null>(null);
   const resizeGroupStartBounds = useRef<{ x: number; y: number; width: number; height: number } | null>(null);
   const activeGroupBounds = useRef<{ x: number; y: number; width: number; height: number } | null>(null);
-  const resizeElementStartBoundsRef = useRef<Record<string, { x: number; y: number; width: number; height: number; type: string; controlPoints?: any[] }>>({});
+  const resizeElementStartBoundsRef = useRef<Record<string, { x: number; y: number; width: number; height: number; type: string; controlPoints?: { x: number; y: number }[] }>>({});
   const resizeElementIdRef = useRef<string | null>(null);
   const rotateStartAngle = useRef<number>(0);
   const rotateCenter = useRef<Point>({ x: 0, y: 0 });
@@ -353,7 +352,7 @@ export function Canvas() {
 
     // Update Input State
     setInputState({
-      activePointerType: e.pointerType as any,
+      activePointerType: e.pointerType as 'mouse' | 'pen' | 'touch',
       lastPressure: e.pressure,
     });
 
@@ -710,7 +709,7 @@ export function Canvas() {
             const newY = newGb.y + (startEl.y - startGb.y) * scaleY;
             const newW = startEl.width * scaleX;
             const newH = startEl.height * scaleY;
-            const updates: any = { x: newX, y: newY, width: newW, height: newH };
+            const updates: Partial<WhiteboardElement> & { controlPoints?: { x: number; y: number }[] } = { x: newX, y: newY, width: newW, height: newH };
             
             if (startEl.type === ShapeType.CONNECTOR && startEl.controlPoints) {
               updates.controlPoints = startEl.controlPoints.map((cp: Point) => ({
@@ -1208,6 +1207,7 @@ export function Canvas() {
   };
 
   // --- Resize handle hit detection (for SelectionBox element) ---
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const getHandleAtPoint = (world: Point, el: WhiteboardElement, zoom: number): ResizeHandle | null => {
     const padding = 10 / zoom;
     const handleRadius = 8 / zoom;
@@ -1372,7 +1372,7 @@ export function Canvas() {
             } else {
               resizeElementIdRef.current = 'group';
               let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-              const startBounds: Record<string, any> = {};
+              const startBounds: Record<string, { x: number; y: number; width: number; height: number; type: string; controlPoints?: { x: number; y: number }[] }> = {};
               selectedArray.forEach(el => {
                 minX = Math.min(minX, el.x);
                 minY = Math.min(minY, el.y);
@@ -1384,7 +1384,7 @@ export function Canvas() {
                   width: el.width, 
                   height: el.height, 
                   type: el.type, 
-                  controlPoints: el.type === ShapeType.CONNECTOR ? (el as any).controlPoints : undefined 
+                  controlPoints: el.type === ShapeType.CONNECTOR ? (el as ConnectorElement).controlPoints : undefined 
                 };
               });
               const gb = { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
