@@ -77,7 +77,8 @@ export function LayersPanel() {
       animate={{ opacity: 1, scale: 1 }}
       exit={{ opacity: 0, scale: 0.95 }}
       transition={{ duration: 0.15 }}
-      className="fixed left-4 md:left-20 top-20 w-64 max-w-[calc(100vw-32px)] max-h-[calc(100vh-140px)] bg-white/90 dark:bg-[#1a1a1e]/90 backdrop-blur-md border border-zinc-200 dark:border-zinc-800 rounded-xl shadow-xl flex flex-col z-30 pointer-events-auto"
+      className="fixed left-4 md:left-20 top-20 w-56 md:w-64 max-w-[calc(100vw-32px)] bg-white/90 dark:bg-[#1a1a1e]/90 backdrop-blur-md border border-zinc-200 dark:border-zinc-800 rounded-xl shadow-xl flex flex-col z-30 pointer-events-auto"
+      style={{ maxHeight: 'calc(var(--app-height, 100vh) - 100px)' }}
     >
       <div className="flex items-center justify-between p-3 border-b border-zinc-200 dark:border-zinc-800 cursor-grab active:cursor-grabbing">
         <h3 className="text-sm font-semibold text-foreground flex items-center gap-2">
@@ -89,7 +90,7 @@ export function LayersPanel() {
         </button>
       </div>
       
-      <div className="p-2 flex flex-col gap-1 max-h-[calc(100vh-140px)] overflow-y-auto custom-scrollbar">
+      <div className="p-2 flex flex-col gap-1 flex-1 min-h-0 overflow-y-auto custom-scrollbar">
         {sortedElements.length === 0 && (
           <div className="text-xs text-zinc-500 text-center py-4">No elements yet</div>
         )}

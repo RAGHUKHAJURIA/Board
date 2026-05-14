@@ -22,7 +22,10 @@ export function StatusBar() {
   const resetZoom = () => setZoom(1);
 
   return (
-    <div className="fixed bottom-4 left-1/2 -translate-x-1/2 z-40 bg-white/90 dark:bg-[#1a1a1e]/90 backdrop-blur-md border border-zinc-200 dark:border-zinc-800 p-1.5 rounded-xl shadow-lg flex items-center gap-2 max-w-[calc(100vw-32px)] overflow-x-auto no-scrollbar">
+    <div
+      className="fixed left-1/2 -translate-x-1/2 z-40 bg-white/90 dark:bg-[#1a1a1e]/90 backdrop-blur-md border border-zinc-200 dark:border-zinc-800 p-1.5 rounded-xl shadow-lg flex items-center gap-2 max-w-[calc(100vw-32px)] overflow-x-auto no-scrollbar"
+      style={{ bottom: 'calc(16px + env(safe-area-inset-bottom, 0px))' }}
+    >
       <div className="flex items-center gap-1 bg-zinc-100 dark:bg-zinc-900/50 rounded-lg p-0.5 px-2">
         <button
           onClick={() => handleZoom(1 / 1.25)}

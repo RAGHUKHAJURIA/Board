@@ -15,7 +15,7 @@ export default function BoardPage() {
   useKeyboardShortcuts();
 
   return (
-    <main className="w-screen h-screen overflow-hidden bg-background text-foreground relative select-none">
+    <main className="w-screen app-height overflow-hidden bg-background text-foreground relative select-none safe-bottom safe-left safe-right">
       {/* Main Menu (Hamburger) */}
       <MainMenu />
       {/* Toolbar - fixed, not inside canvas */}

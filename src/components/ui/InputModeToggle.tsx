@@ -35,11 +35,11 @@ export function InputModeToggle() {
 
   return (
     <div
-      className="fixed bottom-[110px] right-4 sm:bottom-6 sm:right-6 z-[60] flex flex-col items-end sm:items-center gap-2"
+      className="fixed right-4 sm:right-6 z-[60] flex flex-col items-end sm:items-center gap-2"
+      style={{ bottom: 'calc(80px + env(safe-area-inset-bottom, 0px))', touchAction: 'manipulation' }}
       onPointerDown={e => e.stopPropagation()}
       onPointerMove={e => e.stopPropagation()}
       onPointerUp={e => e.stopPropagation()}
-      style={{ touchAction: 'manipulation' }}
       data-input-toggle
     >
       <AnimatePresence>

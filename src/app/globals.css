@@ -105,6 +105,14 @@
     @apply font-sans;
     overscroll-behavior: none;
     touch-action: none;
+    /* Use dvh so height accounts for mobile/tablet browser chrome */
+    --app-height: 100dvh;
+  }
+  /* Fallback for browsers that don't support dvh */
+  @supports not (height: 100dvh) {
+    html {
+      --app-height: 100vh;
+    }
   }
 }
 
@@ -133,10 +141,19 @@
   }
 }
 
-/* Prevent iOS long-press context menu on canvas */
+/* Prevent iOS long-press context menu and Scribble on canvas */
 canvas {
   -webkit-touch-callout: none;
   -webkit-user-select: none;
+  user-select: none;
+  /* Key CSS property: tells Safari not to recognize handwriting on this element */
+  -webkit-user-modify: read-only;
+}
+
+/* Prevent the iOS magnifier and tap highlight during pen strokes */
+canvas, [data-canvas-container] {
+  -webkit-user-select: none;
+  -webkit-tap-highlight-color: transparent;
 }
 
 /* Prevent pull-to-refresh on Android Chrome when drawing at top of screen */
@@ -149,4 +166,24 @@ html {
 [data-input-toggle] {
   touch-action: manipulation;
   -webkit-tap-highlight-color: transparent;
+}
+
+/* ── Tablet / iPad portrait & landscape fixes ──────────────── */
+
+/* Full-height app container using dvh */
+.app-height {
+  height: var(--app-height, 100vh);
+}
+
+/* Safe-area padding for notched devices (iPhone, newer iPads) */
+@supports (padding: env(safe-area-inset-bottom)) {
+  .safe-bottom {
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+  .safe-left {
+    padding-left: env(safe-area-inset-left);
+  }
+  .safe-right {
+    padding-right: env(safe-area-inset-right);
+  }
 }

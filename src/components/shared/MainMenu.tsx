@@ -134,7 +134,7 @@ export function MainMenu() {
             transition={{ duration: 0.25, ease: "easeOut" }}
             className="absolute top-full left-0 mt-3 w-[280px] max-w-[calc(100vw-32px)] bg-[rgba(15,15,25,0.92)] backdrop-blur-[20px] border border-[rgba(255,255,255,0.08)] rounded-2xl shadow-2xl overflow-hidden flex flex-col py-3 text-zinc-200"
           >
-            <div className="max-h-[80vh] overflow-y-auto no-scrollbar pb-2">
+            <div className="max-h-[70vh] overflow-y-auto no-scrollbar pb-2" style={{ maxHeight: 'calc(var(--app-height, 80vh) - 120px)' }}>
               {menuSections.map((section, idx) => (
                 <div key={idx} className="mb-4">
                   <div className="px-5 mb-2 text-[10px] font-bold tracking-widest text-zinc-500">

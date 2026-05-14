@@ -18,11 +18,12 @@ import { ConnectorManager } from '@/lib/canvas/connectors';
 import { debounce } from '@/lib/utils/debounce';
 import { getElementsInSelectionBox } from '@/lib/canvas/hit-test';
 import { hitTestPoint, hitTestConnectorHandles } from '@/lib/canvas/hit-testing';
-import { extractAllCoalescedPoints } from '@/lib/input/pointer-utils';
+import { extractRawCoalescedPoints } from '@/lib/input/pointer-utils';
 import { gestureHandler } from '@/lib/input/gesture-handler';
 import { detectPencilDoubleTap } from '@/lib/input/stylus-buttons';
 import { gatePointerEvent } from '@/lib/input/input-gate';
 import { getDeviceCapabilities } from '@/lib/input/device-detection';
+import { createActiveStroke, clearStrokeTimeout, type ActiveStroke, type CompletionReason } from '@/lib/canvas/stroke-state';
 import { PenCursor } from './PenCursor';
 import { useBlockedTouchFeedback } from './BlockedTouchIndicator';
 
@@ -70,7 +71,7 @@ export function Canvas() {
   // Interaction state
   const modeRef = useRef<InteractionMode>('idle');
   const [mode, setModeState] = useState<InteractionMode>('idle');
-  const setMode = (m: InteractionMode) => { modeRef.current = m; setModeState(m); };
+  const setMode = useCallback((m: InteractionMode) => { modeRef.current = m; setModeState(m); }, []);
 
   const [selectionBox, setSelectionBox] = useState<{ start: Point; end: Point } | null>(null);
   
@@ -102,6 +103,11 @@ export function Canvas() {
   const connectorHandleIndexRef = useRef<number | null>(null);
   const connectorEndpointRef = useRef<'start' | 'end' | null>(null);
 
+  // ── Native freehand stroke tracking (bypasses React synthetic events) ──
+  const activeStrokeRef = useRef<ActiveStroke | null>(null);
+  // Minimum distance between points (world units) to prevent jitter
+  const MIN_POINT_DISTANCE = 0.5;
+
   // Initialize EraserManager
   useEffect(() => {
     eraserRef.current = new EraserManager(spatialIndexRef.current);
@@ -127,6 +133,261 @@ export function Canvas() {
       state.inputMode.mode = savedMode;
     });
   }, []);
+
+  // ── Finalize stroke helper ──────────────────────────────────────────────
+  // All completion paths (pointerup, pointercancel, lostpointercapture,
+  // timeout, force-complete) funnel through this single function.
+  const finalizeActiveStroke = useCallback((
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    _reason: CompletionReason
+  ) => {
+    const stroke = activeStrokeRef.current;
+    if (!stroke) return;
+
+    clearStrokeTimeout(stroke);
+    stroke.phase = 'completing';
+
+    const store = useCanvasStore.getState();
+    const el = store.elements[stroke.elementId];
+
+    if (el && el.type === ShapeType.FREEHAND) {
+      if (stroke.points.length < 2) {
+        // Single-point tap — too small to keep
+        store.deleteElements([stroke.elementId]);
+        store.clearSelection();
+      } else {
+        // Commit final points to the store
+        store.updateElement(stroke.elementId, {
+          points: stroke.points,
+        });
+        store.saveSnapshot();
+      }
+    }
+
+    activeStrokeRef.current = null;
+    if (modeRef.current === 'freehand') {
+      currentElementRef.current = null;
+      setMode('idle');
+      setIsInteracting(false);
+    }
+  }, [setIsInteracting, setMode]);
+
+  // ── Native freehand pointer listeners (bypass React synthetic events) ──
+  // React's synthetic event system processes one event per render cycle and
+  // does NOT expose getCoalescedEvents(). Attaching raw native listeners
+  // directly to the canvas DOM node fixes stroke skipping on iPad.
+  useEffect(() => {
+    if (!canvasRef.current) return;
+    const canvas = canvasRef.current; // TS narrows: HTMLCanvasElement
+
+    function handleNativeFreehandDown(e: PointerEvent) {
+      const store = useCanvasStore.getState();
+      const currentTool = store.tool;
+      if (currentTool !== ShapeType.FREEHAND) return;
+
+      // Only intercept pen/touch events that would draw freehand
+      // Let the React handler manage everything else
+      const im = store.inputMode;
+      const decision = gatePointerEvent(e, im.mode, im.isTouchDevice);
+      if (decision !== 'allow') return;
+
+      // Don't intercept right-click or if already in a non-idle/non-freehand mode
+      if (e.button === 2) return;
+      const currentMode = modeRef.current;
+      if (currentMode !== 'idle' && currentMode !== 'freehand') return;
+
+      // CRITICAL: preventDefault stops iOS Scribble from intercepting pen events
+      if (e.pointerType === 'pen') {
+        e.preventDefault();
+      }
+
+      // If a stroke is already open for a DIFFERENT pointer, finalize it
+      if (activeStrokeRef.current && activeStrokeRef.current.pointerId !== e.pointerId) {
+        finalizeActiveStroke('force-complete');
+      }
+
+      // Capture the pointer so move/up fire on canvas even if pointer leaves bounds
+      try { canvas.setPointerCapture(e.pointerId); } catch {}
+
+      const vp = store.viewport;
+      const rect = canvas.getBoundingClientRect();
+      const screenX = e.clientX - rect.left;
+      const screenY = e.clientY - rect.top;
+      const worldX = (screenX - vp.x) / vp.zoom;
+      const worldY = (screenY - vp.y) / vp.zoom;
+      const pressure = e.pressure > 0 ? Math.max(0.1, e.pressure) : 0.5;
+
+      // Create the freehand element in the store
+      const id = uuidv4();
+      const newEl: FreehandElement = {
+        id,
+        type: ShapeType.FREEHAND,
+        x: worldX,
+        y: worldY,
+        width: 0,
+        height: 0,
+        rotation: 0,
+        locked: false,
+        zIndex: Date.now(),
+        style: { ...useUIStore.getState().currentStyle },
+        points: [[worldX, worldY, pressure]],
+        simulatePressure: e.pointerType !== 'pen',
+      };
+      store.addElement(newEl);
+      store.selectElements([id]);
+      currentElementRef.current = newEl;
+      setMode('freehand');
+      setIsInteracting(true);
+
+      // Create active stroke tracking
+      const stroke = createActiveStroke(e.pointerId, e.pointerType, id, worldX, worldY, pressure);
+      activeStrokeRef.current = stroke;
+
+      // Safety timeout: if pen-up never fires within 10s, auto-complete
+      stroke.timeoutHandle = setTimeout(() => {
+        if (activeStrokeRef.current?.pointerId === e.pointerId) {
+          console.warn('[Drawer] Pen-up safety timeout — force completing stroke');
+          finalizeActiveStroke('timeout');
+        }
+      }, 10_000);
+    }
+
+    function handleNativeFreehandMove(e: PointerEvent) {
+      const stroke = activeStrokeRef.current;
+      if (!stroke || stroke.pointerId !== e.pointerId) return;
+      if (stroke.phase !== 'drawing' && stroke.phase !== 'pen-down') return;
+
+      const store = useCanvasStore.getState();
+      const im = store.inputMode;
+      const decision = gatePointerEvent(e, im.mode, im.isTouchDevice);
+      if (decision !== 'allow') return;
+
+      // Prevent Scribble/scroll interference during active pen stroke
+      if (e.pointerType === 'pen') e.preventDefault();
+
+      // Transition from pen-down to drawing on first move
+      if (stroke.phase === 'pen-down') {
+        stroke.phase = 'drawing';
+      }
+
+      // Process ALL coalesced points — critical for smooth fast strokes
+      const vp = store.viewport;
+      const newPoints = extractRawCoalescedPoints(e, canvas, vp);
+
+      // Deduplication: skip points too close to the last point (prevents micro-jitter)
+      const minDist = MIN_POINT_DISTANCE / vp.zoom;
+      for (const pt of newPoints) {
+        const dx = pt[0] - stroke.lastX;
+        const dy = pt[1] - stroke.lastY;
+        if (Math.hypot(dx, dy) >= minDist || stroke.points.length < 2) {
+          stroke.points.push(pt);
+          stroke.lastX = pt[0];
+          stroke.lastY = pt[1];
+        }
+      }
+
+      stroke.lastEventTime = performance.now();
+
+      // Update store element with accumulated points
+      store.updateElement(stroke.elementId, {
+        points: stroke.points,
+        simulatePressure: e.pointerType !== 'pen',
+      });
+      currentElementRef.current = {
+        ...currentElementRef.current!,
+        points: stroke.points,
+      } as FreehandElement;
+    }
+
+    function handleNativeFreehandUp(e: PointerEvent) {
+      const stroke = activeStrokeRef.current;
+      if (!stroke || stroke.pointerId !== e.pointerId) return;
+
+      // Add final position (pressure 0 at lift = tapered stroke end)
+      const vp = useCanvasStore.getState().viewport;
+      const rect = canvas.getBoundingClientRect();
+      const worldX = (e.clientX - rect.left - vp.x) / vp.zoom;
+      const worldY = (e.clientY - rect.top - vp.y) / vp.zoom;
+      const dx = worldX - stroke.lastX;
+      const dy = worldY - stroke.lastY;
+      if (Math.hypot(dx, dy) > 0.1) {
+        stroke.points.push([worldX, worldY, 0]);
+      }
+
+      finalizeActiveStroke('pointer-up');
+    }
+
+    // CRITICAL: iOS fires pointercancel instead of pointerup when Scribble
+    // or system gestures steal the pointer. DO NOT discard — save the stroke.
+    function handleNativeFreehandCancel(e: PointerEvent) {
+      const stroke = activeStrokeRef.current;
+      if (!stroke || stroke.pointerId !== e.pointerId) return;
+      console.warn('[Drawer] pointercancel — completing stroke with existing points');
+      finalizeActiveStroke('pointer-cancel');
+    }
+
+    function handleLostPointerCapture(e: PointerEvent) {
+      const stroke = activeStrokeRef.current;
+      if (!stroke || stroke.pointerId !== e.pointerId) return;
+      if (stroke.phase === 'drawing' || stroke.phase === 'pen-down') {
+        console.warn('[Drawer] lostpointercapture — completing open stroke');
+        finalizeActiveStroke('lost-capture');
+      }
+    }
+
+    // Use { passive: false } so we can call preventDefault() to block Scribble
+    canvas.addEventListener('pointerdown', handleNativeFreehandDown, { passive: false });
+    canvas.addEventListener('pointermove', handleNativeFreehandMove, { passive: false });
+    canvas.addEventListener('pointerup', handleNativeFreehandUp, { passive: false });
+    canvas.addEventListener('pointercancel', handleNativeFreehandCancel, { passive: false });
+    canvas.addEventListener('lostpointercapture', handleLostPointerCapture, { passive: true });
+
+    return () => {
+      canvas.removeEventListener('pointerdown', handleNativeFreehandDown);
+      canvas.removeEventListener('pointermove', handleNativeFreehandMove);
+      canvas.removeEventListener('pointerup', handleNativeFreehandUp);
+      canvas.removeEventListener('pointercancel', handleNativeFreehandCancel);
+      canvas.removeEventListener('lostpointercapture', handleLostPointerCapture);
+    };
+  }, [finalizeActiveStroke, setIsInteracting, setMode]);
+
+  // ── Window-level fallback listeners for missed pen-up events ───────────
+  // iOS sometimes delivers pointerup to window instead of canvas
+  useEffect(() => {
+    function handleWindowPointerUp(e: PointerEvent) {
+      const stroke = activeStrokeRef.current;
+      if (!stroke || stroke.pointerId !== e.pointerId) return;
+      if (stroke.phase === 'drawing' || stroke.phase === 'pen-down') {
+        console.warn('[Drawer] window pointerup caught missed canvas pointerup');
+        finalizeActiveStroke('pointer-up');
+      }
+    }
+
+    function handleWindowPointerCancel(e: PointerEvent) {
+      const stroke = activeStrokeRef.current;
+      if (!stroke || stroke.pointerId !== e.pointerId) return;
+      if (stroke.phase === 'drawing' || stroke.phase === 'pen-down') {
+        finalizeActiveStroke('pointer-cancel');
+      }
+    }
+
+    // visibilitychange: user switches app mid-stroke (iPad multitasking)
+    function handleVisibilityChange() {
+      if (document.visibilityState === 'hidden' && activeStrokeRef.current) {
+        finalizeActiveStroke('force-complete');
+      }
+    }
+
+    window.addEventListener('pointerup', handleWindowPointerUp);
+    window.addEventListener('pointercancel', handleWindowPointerCancel);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+
+    return () => {
+      window.removeEventListener('pointerup', handleWindowPointerUp);
+      window.removeEventListener('pointercancel', handleWindowPointerCancel);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, [finalizeActiveStroke]);
 
   // Keyboard shortcuts
   useEffect(() => {
@@ -559,26 +820,10 @@ export function Canvas() {
     }
     // ─── END UNIVERSAL CLICK-TO-SELECT ───────────────────────────────────
 
-    // Freehand drawing
+    // Freehand drawing — handled by native event listeners (see useEffect above)
+    // Native listeners bypass React's synthetic event system to get coalesced
+    // points and reliable pen-up on iPad. Skip here to avoid double-processing.
     if (tool === ShapeType.FREEHAND) {
-      const id = uuidv4();
-      const newEl: FreehandElement = {
-        id,
-        type: ShapeType.FREEHAND,
-        x: world.x,
-        y: world.y,
-        width: 0,
-        height: 0,
-        rotation: 0,
-        locked: false,
-        zIndex: Date.now(),
-        style: { ...currentStyle },
-        points: [[world.x, world.y, e.pressure > 0 ? e.pressure : 0.5]],
-      };
-      addElement(newEl);
-      selectElements([id]);
-      currentElementRef.current = newEl;
-      setMode('freehand');
       return;
     }
 
@@ -786,22 +1031,9 @@ export function Canvas() {
       }
 
       case 'freehand': {
-        if (!currentElementRef.current) break;
-        const el = currentElementRef.current as FreehandElement;
-        
-        const coalescedPoints = extractAllCoalescedPoints(nativeEvent, canvasRef.current!, useCanvasStore.getState().viewport);
-        const existingPoints = el.points.map(
-          ([x, y, p]) => [x, y, p ?? 0.5] as [number, number, number]
-        );
-        
-        const addedPoints = coalescedPoints.map(p => [p.x, p.y, p.pressure] as [number, number, number]);
-        const newPoints = [...existingPoints, ...addedPoints];
-        
-        updateElement(el.id, { 
-          points: newPoints,
-          simulatePressure: e.pointerType === 'mouse' // REAL pressure for pen/touch!
-        });
-        currentElementRef.current = { ...el, points: newPoints };
+        // Freehand move is handled by native event listeners (handleNativeFreehandMove)
+        // which process coalesced sub-frame points for smooth fast strokes.
+        // This React handler is intentionally empty — native takes precedence.
         break;
       }
 
@@ -985,18 +1217,16 @@ export function Canvas() {
     
     if (prevMode === 'drawing' || prevMode === 'freehand') {
       const el = currentElementRef.current;
-      // Remove zero-size elements (just a click)
+      // Remove zero-size elements (just a click) — shape drawing only
       if (el && Math.abs(el.width) < 2 && Math.abs(el.height) < 2 && el.type !== ShapeType.FREEHAND) {
         deleteElements([el.id]);
         clearSelection();
       }
-      // Save freehand to history
-      if (el && el.type === ShapeType.FREEHAND) {
-        const fh = el as FreehandElement;
-        if (fh.points.length < 2) {
-          deleteElements([el.id]);
-          clearSelection();
-        }
+      // Freehand completion is handled by native listeners (finalizeActiveStroke).
+      // If we arrive here with an active stroke still open, finalize it as a safety fallback.
+      if (prevMode === 'freehand' && activeStrokeRef.current) {
+        finalizeActiveStroke('pointer-up');
+        return; // finalizeActiveStroke handles mode reset
       }
       currentElementRef.current = null;
     }
@@ -1366,6 +1596,12 @@ export function Canvas() {
       onPointerUp={handlePointerUp}
       onDrop={handleDrop}
       onDragOver={(e) => e.preventDefault()}
+      // Tells iPadOS this region is not a text input area — disables Scribble
+      inputMode="none"
+      autoCorrect="off"
+      autoCapitalize="off"
+      spellCheck={false}
+      data-canvas-container
     >
       <input 
         type="file" 
@@ -1378,7 +1614,6 @@ export function Canvas() {
         ref={canvasRef}
         onPointerDown={handlePointerDown}
         onDoubleClick={handleDoubleClick}
-        onPointerCancel={handlePointerUp}
         className="absolute inset-0"
         style={{
           touchAction: 'none',
