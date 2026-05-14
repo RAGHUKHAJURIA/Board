@@ -355,7 +355,7 @@ export function AdvancedToolbar() {
           dragControls={dragControls}
           dragListener={false}
           dragMomentum={false}
-          className="fixed left-3 bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-xl shadow-lg p-1.5 flex flex-col gap-0.5 z-50 pointer-events-auto outline-none"
+          className="fixed left-3 bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-xl shadow-lg p-1.5 flex flex-col gap-0.5 z-50 pointer-events-auto outline-none max-h-[calc(100vh-140px)] overflow-y-auto no-scrollbar"
           style={{ width: '44px', top: '120px' }}
         >
           {/* Drag handle — only this initiates drag */}
@@ -435,7 +435,7 @@ export function AdvancedToolbar() {
         dragControls={dragControls}
         dragListener={false}
         dragMomentum={false}
-        className="fixed bottom-20 left-0 right-0 mx-auto bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-xl shadow-lg px-2 py-1.5 flex flex-row items-center gap-0.5 z-50 pointer-events-auto outline-none"
+        className="fixed bottom-20 left-0 right-0 mx-auto bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-xl shadow-lg px-2 py-1.5 flex flex-row items-center gap-0.5 z-50 pointer-events-auto outline-none max-w-[calc(100vw-32px)] overflow-x-auto no-scrollbar"
         style={{ width: 'max-content' }}
       >
         {/* Drag handle — only this initiates drag */}

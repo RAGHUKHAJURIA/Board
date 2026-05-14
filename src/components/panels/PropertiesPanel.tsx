@@ -57,7 +57,7 @@ export function PropertiesPanel() {
       animate={{ opacity: 1, scale: 1 }}
       exit={{ opacity: 0, scale: 0.95 }}
       transition={{ duration: 0.15 }}
-      className="fixed right-4 top-20 w-64 bg-white/95 dark:bg-[#1a1a1e]/95 backdrop-blur-md border border-zinc-200 dark:border-zinc-800 rounded-xl shadow-xl flex flex-col z-30 pointer-events-auto"
+      className="fixed right-4 top-20 w-64 max-w-[calc(100vw-32px)] max-h-[calc(100vh-140px)] bg-white/95 dark:bg-[#1a1a1e]/95 backdrop-blur-md border border-zinc-200 dark:border-zinc-800 rounded-xl shadow-xl flex flex-col z-30 pointer-events-auto"
     >
       <div className="flex items-center justify-between p-3 border-b border-zinc-200 dark:border-zinc-800 cursor-grab active:cursor-grabbing">
         <h3 className="text-sm font-semibold text-foreground flex items-center gap-2">
@@ -71,7 +71,7 @@ export function PropertiesPanel() {
         </button>
       </div>
 
-      <div className="p-4 flex flex-col gap-5">
+      <div className="p-4 flex flex-col gap-5 overflow-y-auto custom-scrollbar">
 
         {/* Transform */}
         <div className="flex flex-col gap-3">

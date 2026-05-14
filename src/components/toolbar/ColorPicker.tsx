@@ -70,6 +70,10 @@ export function ColorPicker({ color, onChange, label, allowTransparent, position
         break;
     }
 
+    // Clamp left to avoid overflowing off-screen on mobile
+    if (left < 8) left = 8;
+    if (left + 240 > window.innerWidth - 8) left = window.innerWidth - 248;
+
     setPopoverPos({ top, left });
   }, [position]);
 

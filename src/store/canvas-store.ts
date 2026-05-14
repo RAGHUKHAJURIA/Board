@@ -3,6 +3,7 @@ import { persist } from 'zustand/middleware';
 import { immer } from 'zustand/middleware/immer';
 import { enableMapSet } from 'immer';
 import { WhiteboardElement, ConnectorElement, Viewport, Tool, ShapeType, IconElement } from '@/types';
+import type { CanvasInputMode, InputModeState } from '@/types/input';
 import { getElementBBox } from '@/lib/utils/geometry';
 import { ConnectorManager } from '@/lib/canvas/connectors';
 import { ConnectorHandleHit } from '@/lib/canvas/hit-testing';
@@ -34,13 +35,15 @@ interface CanvasState {
   isCanvasBackgroundCustomized: boolean;
   iconPickerOpen: boolean;
   inputState: InputState;
-
+  inputMode: InputModeState;
 
   // History for proper undo/redo
   history: HistorySnapshot[];
   historyIndex: number;
 
   // Actions
+  setInputMode: (mode: CanvasInputMode) => void;
+  toggleInputMode: () => void;
   setInputState: (patch: Partial<InputState>) => void;
   setActiveHandle: (handle: ConnectorHandleHit | null) => void;
   setCanvasBackground: (color: string) => void;
@@ -134,6 +137,11 @@ export const useCanvasStore = create<CanvasState>()(
       isPenHovering: false,
       lastPressure: 0.5,
     },
+    inputMode: {
+      mode: 'hand',
+      isTouchDevice: false,
+      isTablet: false,
+    },
     history: [{ elements: {}, canvasBackground: '#000000' }],
     historyIndex: 0,
     connectorsByElement: new Map(),
@@ -141,6 +149,18 @@ export const useCanvasStore = create<CanvasState>()(
     draftConnector: null,
     activeHandle: null,
     
+    setInputMode: (mode) => set((state) => {
+      state.inputMode.mode = mode;
+      try {
+        localStorage.setItem('drawer_input_mode', mode);
+      } catch {}
+    }),
+    toggleInputMode: () => set((state) => {
+      state.inputMode.mode = state.inputMode.mode === 'pen' ? 'hand' : 'pen';
+      try {
+        localStorage.setItem('drawer_input_mode', state.inputMode.mode);
+      } catch {}
+    }),
     setInputState: (patch) => set((state) => {
       Object.assign(state.inputState, patch);
     }),

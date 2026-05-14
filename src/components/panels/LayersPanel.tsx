@@ -77,7 +77,7 @@ export function LayersPanel() {
       animate={{ opacity: 1, scale: 1 }}
       exit={{ opacity: 0, scale: 0.95 }}
       transition={{ duration: 0.15 }}
-      className="fixed left-20 top-20 w-64 bg-white/90 dark:bg-[#1a1a1e]/90 backdrop-blur-md border border-zinc-200 dark:border-zinc-800 rounded-xl shadow-xl flex flex-col z-30 pointer-events-auto"
+      className="fixed left-4 md:left-20 top-20 w-64 max-w-[calc(100vw-32px)] max-h-[calc(100vh-140px)] bg-white/90 dark:bg-[#1a1a1e]/90 backdrop-blur-md border border-zinc-200 dark:border-zinc-800 rounded-xl shadow-xl flex flex-col z-30 pointer-events-auto"
     >
       <div className="flex items-center justify-between p-3 border-b border-zinc-200 dark:border-zinc-800 cursor-grab active:cursor-grabbing">
         <h3 className="text-sm font-semibold text-foreground flex items-center gap-2">

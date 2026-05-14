@@ -21,7 +21,10 @@ import { hitTestPoint, hitTestConnectorHandles } from '@/lib/canvas/hit-testing'
 import { extractAllCoalescedPoints } from '@/lib/input/pointer-utils';
 import { gestureHandler } from '@/lib/input/gesture-handler';
 import { detectPencilDoubleTap } from '@/lib/input/stylus-buttons';
+import { gatePointerEvent } from '@/lib/input/input-gate';
+import { getDeviceCapabilities } from '@/lib/input/device-detection';
 import { PenCursor } from './PenCursor';
+import { useBlockedTouchFeedback } from './BlockedTouchIndicator';
 
 type InteractionMode =
   | 'idle'
@@ -48,6 +51,7 @@ export function Canvas() {
   const viewport = useCanvasStore(state => state.viewport);
   const tool = useCanvasStore(state => state.tool);
   const canvasBackground = useCanvasStore(state => state.canvasBackground);
+  const inputMode = useCanvasStore(state => state.inputMode);
   const { addElement, updateElement, deleteElements, selectElements, clearSelection, updateViewport, saveSnapshot, setTool, setIsInteracting, batchErase } = useCanvasStore();
 
   const currentStyle = useUIStore(state => state.currentStyle);
@@ -69,6 +73,8 @@ export function Canvas() {
   const setMode = (m: InteractionMode) => { modeRef.current = m; setModeState(m); };
 
   const [selectionBox, setSelectionBox] = useState<{ start: Point; end: Point } | null>(null);
+  
+  const { showBlockedFeedback, BlockedTouchIndicator } = useBlockedTouchFeedback();
 
   // Text editing
   const [textEditingId, setTextEditingId] = useState<string | null>(null);
@@ -99,6 +105,27 @@ export function Canvas() {
   // Initialize EraserManager
   useEffect(() => {
     eraserRef.current = new EraserManager(spatialIndexRef.current);
+  }, []);
+
+  // Initialize device capabilities for input mode
+  useEffect(() => {
+    const caps = getDeviceCapabilities();
+
+    let savedMode: 'pen' | 'hand' = 'hand';
+    try {
+      const stored = localStorage.getItem('drawer_input_mode');
+      if (stored === 'pen' || stored === 'hand') savedMode = stored;
+    } catch {}
+
+    if (caps.isTablet && !localStorage.getItem('drawer_input_mode')) {
+      savedMode = 'pen';
+    }
+
+    useCanvasStore.setState(state => {
+      state.inputMode.isTouchDevice = caps.isTouchCapable;
+      state.inputMode.isTablet = caps.isTablet || caps.isMobile;
+      state.inputMode.mode = savedMode;
+    });
   }, []);
 
   // Keyboard shortcuts
@@ -323,6 +350,13 @@ export function Canvas() {
 
 
   const handlePointerDown = (e: React.PointerEvent) => {
+    const decision = gatePointerEvent(e.nativeEvent, inputMode.mode, inputMode.isTouchDevice);
+    if (decision === 'block-touch') {
+      showBlockedFeedback(e.clientX, e.clientY);
+      return;
+    }
+    if (decision === 'block-pen') return;
+
     if (e.button === 2) return; // ignore right-click
 
     // Apple Pencil Double Tap
@@ -605,6 +639,9 @@ export function Canvas() {
   };
 
   const handlePointerMove = (e: React.PointerEvent) => {
+    const decision = gatePointerEvent(e.nativeEvent, inputMode.mode, inputMode.isTouchDevice);
+    if (decision === 'block-touch' || decision === 'block-pen') return;
+
     const nativeEvent = e.nativeEvent;
 
     // Skip rejected (palm) pointers
@@ -934,6 +971,9 @@ export function Canvas() {
 
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const handlePointerUp = (e: React.PointerEvent) => {
+    const decision = gatePointerEvent(e.nativeEvent, inputMode.mode, inputMode.isTouchDevice);
+    if (decision === 'block-touch' || decision === 'block-pen') return;
+
     rejectedPointers.current.delete(e.pointerId);
     gestureHandler.onPointerUp(e.nativeEvent);
 
@@ -1444,6 +1484,7 @@ export function Canvas() {
       {tool === 'eraser' && (
         <EraserCursor size={eraserSettings.size} zoom={viewport.zoom} />
       )}
+      <BlockedTouchIndicator />
     </div>
   );
 }

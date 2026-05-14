@@ -132,7 +132,7 @@ export function MainMenu() {
             animate={{ opacity: 1, x: 0 }}
             exit={{ opacity: 0, x: -20 }}
             transition={{ duration: 0.25, ease: "easeOut" }}
-            className="absolute top-full left-0 mt-3 w-[280px] bg-[rgba(15,15,25,0.92)] backdrop-blur-[20px] border border-[rgba(255,255,255,0.08)] rounded-2xl shadow-2xl overflow-hidden flex flex-col py-3 text-zinc-200"
+            className="absolute top-full left-0 mt-3 w-[280px] max-w-[calc(100vw-32px)] bg-[rgba(15,15,25,0.92)] backdrop-blur-[20px] border border-[rgba(255,255,255,0.08)] rounded-2xl shadow-2xl overflow-hidden flex flex-col py-3 text-zinc-200"
           >
             <div className="max-h-[80vh] overflow-y-auto no-scrollbar pb-2">
               {menuSections.map((section, idx) => (

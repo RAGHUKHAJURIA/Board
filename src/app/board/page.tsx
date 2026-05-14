@@ -7,6 +7,7 @@ import { PropertiesPanel } from '@/components/panels/PropertiesPanel';
 import { LayersPanel } from '@/components/panels/LayersPanel';
 import { StatusBar } from '@/components/shared/StatusBar';
 import { MainMenu } from '@/components/shared/MainMenu';
+import { InputModeToggle } from '@/components/ui/InputModeToggle';
 import { useKeyboardShortcuts } from '@/hooks/useKeyboardShortcuts';
 
 export default function BoardPage() {
@@ -26,6 +27,8 @@ export default function BoardPage() {
 
       {/* Canvas fills the whole screen */}
       <Canvas />
+
+      <InputModeToggle />
 
       {/* Status bar */}
       <StatusBar />
