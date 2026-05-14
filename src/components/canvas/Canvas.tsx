@@ -158,7 +158,7 @@ export function Canvas() {
       } else {
         // Commit final points to the store
         store.updateElement(stroke.elementId, {
-          points: stroke.points,
+          points: [...stroke.points],
         });
         store.saveSnapshot();
       }
@@ -290,12 +290,12 @@ export function Canvas() {
 
       // Update store element with accumulated points
       store.updateElement(stroke.elementId, {
-        points: stroke.points,
+        points: [...stroke.points],
         simulatePressure: e.pointerType !== 'pen',
       });
       currentElementRef.current = {
         ...currentElementRef.current!,
-        points: stroke.points,
+        points: [...stroke.points],
       } as FreehandElement;
     }
 
