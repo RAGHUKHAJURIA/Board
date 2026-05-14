@@ -20,7 +20,6 @@ import { getElementsInSelectionBox } from '@/lib/canvas/hit-test';
 import { hitTestPoint, hitTestConnectorHandles } from '@/lib/canvas/hit-testing';
 import { extractRawCoalescedPoints } from '@/lib/input/pointer-utils';
 import { gestureHandler } from '@/lib/input/gesture-handler';
-import { detectPencilDoubleTap } from '@/lib/input/stylus-buttons';
 import { gatePointerEvent } from '@/lib/input/input-gate';
 import { getDeviceCapabilities } from '@/lib/input/device-detection';
 import { createActiveStroke, clearStrokeTimeout, type ActiveStroke, type CompletionReason } from '@/lib/canvas/stroke-state';
@@ -198,8 +197,8 @@ export function Canvas() {
         e.preventDefault();
       }
 
-      // If a stroke is already open for a DIFFERENT pointer, finalize it
-      if (activeStrokeRef.current && activeStrokeRef.current.pointerId !== e.pointerId) {
+      // If a stroke is already open (e.g. missed pointerup), finalize it
+      if (activeStrokeRef.current) {
         finalizeActiveStroke('force-complete');
       }
 
@@ -613,12 +612,6 @@ export function Canvas() {
     if (decision === 'block-pen') return;
 
     if (e.button === 2) return; // ignore right-click
-
-    // Apple Pencil Double Tap
-    if (detectPencilDoubleTap(e)) {
-      setTool(tool === ShapeType.FREEHAND ? 'eraser' : ShapeType.FREEHAND);
-      return;
-    }
 
     // Tablet Palm Rejection and Gestures
     const nativeEvent = e.nativeEvent;
