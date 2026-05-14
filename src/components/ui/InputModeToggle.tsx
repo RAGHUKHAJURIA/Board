@@ -27,7 +27,6 @@ function HandIcon() {
 
 export function InputModeToggle() {
   const inputMode = useCanvasStore(s => s.inputMode);
-  const toggleInputMode = useCanvasStore(s => s.toggleInputMode);
   const setInputMode = useCanvasStore(s => s.setInputMode);
 
   if (!inputMode.isTouchDevice && !inputMode.isTablet) return null;

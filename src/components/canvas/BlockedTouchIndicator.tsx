@@ -4,12 +4,13 @@ import { motion, AnimatePresence } from 'framer-motion';
 
 interface RipplePoint { id: number; x: number; y: number; }
 
+let globalCounter = 0;
+
 export function useBlockedTouchFeedback() {
   const [ripples, setRipples] = useState<RipplePoint[]>([]);
-  let counter = 0;
 
   const showBlockedFeedback = useCallback((clientX: number, clientY: number) => {
-    const id = ++counter;
+    const id = ++globalCounter;
     setRipples(prev => [...prev, { id, x: clientX, y: clientY }]);
     setTimeout(() => {
       setRipples(prev => prev.filter(r => r.id !== id));
