@@ -25,7 +25,6 @@ import { gatePointerEvent } from '@/lib/input/input-gate';
 import { getDeviceCapabilities } from '@/lib/input/device-detection';
 import { createActiveStroke, clearStrokeTimeout, type ActiveStroke, type CompletionReason } from '@/lib/canvas/stroke-state';
 import { PenCursor } from './PenCursor';
-import { useBlockedTouchFeedback } from './BlockedTouchIndicator';
 
 type InteractionMode =
   | 'idle'
@@ -74,8 +73,6 @@ export function Canvas() {
   const setMode = useCallback((m: InteractionMode) => { modeRef.current = m; setModeState(m); }, []);
 
   const [selectionBox, setSelectionBox] = useState<{ start: Point; end: Point } | null>(null);
-  
-  const { showBlockedFeedback, BlockedTouchIndicator } = useBlockedTouchFeedback();
 
   // Text editing
   const [textEditingId, setTextEditingId] = useState<string | null>(null);
@@ -612,10 +609,7 @@ export function Canvas() {
 
   const handlePointerDown = (e: React.PointerEvent) => {
     const decision = gatePointerEvent(e.nativeEvent, inputMode.mode, inputMode.isTouchDevice);
-    if (decision === 'block-touch') {
-      showBlockedFeedback(e.clientX, e.clientY);
-      return;
-    }
+    if (decision === 'block-touch') return;
     if (decision === 'block-pen') return;
 
     if (e.button === 2) return; // ignore right-click
@@ -1719,7 +1713,6 @@ export function Canvas() {
       {tool === 'eraser' && (
         <EraserCursor size={eraserSettings.size} zoom={viewport.zoom} />
       )}
-      <BlockedTouchIndicator />
     </div>
   );
 }
