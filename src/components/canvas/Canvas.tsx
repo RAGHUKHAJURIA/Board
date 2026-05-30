@@ -179,7 +179,25 @@ export function Canvas() {
     function handleNativeFreehandDown(e: PointerEvent) {
       const store = useCanvasStore.getState();
       const currentTool = store.tool;
-      if (currentTool !== ShapeType.FREEHAND) return;
+
+      // Support active/passive pens that report as touch but have pen characteristics:
+      const isPen = e.pointerType === 'pen' || 
+                    (e.tiltX !== undefined && e.tiltX !== 0) || 
+                    (e.tiltY !== undefined && e.tiltY !== 0) || 
+                    (e.pressure !== undefined && e.pressure > 0 && e.pressure !== 0.5 && e.pressure !== 1) ||
+                    /stylus|pen|s-pen/i.test((e as PointerEvent & { touchType?: string }).touchType || '') ||
+                    /stylus|pen|s-pen/i.test(e.pointerType || '');
+
+      // Automatically switch to FREEHAND drawing tool when pen touches the screen and we are in select/hand mode
+      if (isPen && (currentTool === 'select' || currentTool === 'hand')) {
+        if (modeRef.current !== 'text-editing') {
+          store.setTool(ShapeType.FREEHAND);
+        }
+      }
+
+      // Re-read currentTool after possible auto-switch
+      const activeTool = store.tool;
+      if (activeTool !== ShapeType.FREEHAND) return;
 
       // Only intercept pen/touch events that would draw freehand
       // Let the React handler manage everything else
@@ -192,10 +210,8 @@ export function Canvas() {
       const currentMode = modeRef.current;
       if (currentMode !== 'idle' && currentMode !== 'freehand') return;
 
-      // CRITICAL: preventDefault stops iOS Scribble from intercepting pen events
-      if (e.pointerType === 'pen') {
-        e.preventDefault();
-      }
+      // CRITICAL: preventDefault stops browser gestures/scrolling from intercepting active drawing
+      e.preventDefault();
 
       // If a stroke is already open (e.g. missed pointerup), finalize it
       if (activeStrokeRef.current) {
@@ -258,8 +274,8 @@ export function Canvas() {
       const decision = gatePointerEvent(e, im.mode, im.isTouchDevice);
       if (decision !== 'allow') return;
 
-      // Prevent Scribble/scroll interference during active pen stroke
-      if (e.pointerType === 'pen') e.preventDefault();
+      // Prevent browser gestures/scrolling from cancelling active drawing
+      e.preventDefault();
 
       // Transition from pen-down to drawing on first move
       if (stroke.phase === 'pen-down') {
@@ -299,6 +315,8 @@ export function Canvas() {
       const stroke = activeStrokeRef.current;
       if (!stroke || stroke.pointerId !== e.pointerId) return;
 
+      e.preventDefault();
+
       // Add final position (pressure 0 at lift = tapered stroke end)
       const vp = useCanvasStore.getState().viewport;
       const rect = canvas.getBoundingClientRect();
@@ -318,6 +336,7 @@ export function Canvas() {
     function handleNativeFreehandCancel(e: PointerEvent) {
       const stroke = activeStrokeRef.current;
       if (!stroke || stroke.pointerId !== e.pointerId) return;
+      e.preventDefault();
       console.warn('[Drawer] pointercancel — completing stroke with existing points');
       finalizeActiveStroke('pointer-cancel');
     }
@@ -1366,6 +1385,7 @@ export function Canvas() {
   // ─────────────────────────────────────────────────────────────────────────
 
   const handleDoubleClick = (e: React.MouseEvent) => {
+    e.preventDefault();
     if (tool === 'select') {
       const world = screenToWorld(e.clientX, e.clientY);
       const selectedArray = getSelectedElements();

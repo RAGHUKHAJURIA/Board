@@ -25,8 +25,6 @@ export function gatePointerEvent(
 
   if (isPen) {
     markStylusSeen();
-    if (mode === 'pen') return 'allow';
-    if (mode === 'hand') return 'block-pen';
     return 'allow';
   }
 
