@@ -117,7 +117,34 @@ interface CanvasState {
 }
 
 const cloneElements = (elements: Record<string, WhiteboardElement>): Record<string, WhiteboardElement> => {
-  return JSON.parse(JSON.stringify(elements));
+  const clone: Record<string, WhiteboardElement> = {};
+  for (const id in elements) {
+    if (Object.prototype.hasOwnProperty.call(elements, id)) {
+      const el = elements[id]!;
+      
+      let points: [number, number, number?][] | undefined;
+      if (el.type === ShapeType.FREEHAND) {
+        points = [...(el as FreehandElement).points];
+      }
+      
+      let controlPoints: { x: number; y: number }[] | undefined;
+      if (el.type === ShapeType.CONNECTOR) {
+        const conn = el as ConnectorElement;
+        if (conn.controlPoints) {
+          controlPoints = conn.controlPoints.map((cp) => ({ ...cp }));
+        }
+      }
+
+      clone[id] = {
+        ...el,
+        style: el.style ? { ...el.style } : el.style,
+        ...(points ? { points } : {}),
+        ...(controlPoints ? { controlPoints } : {}),
+        bbox: el.bbox ? { ...el.bbox } : undefined,
+      } as WhiteboardElement;
+    }
+  }
+  return clone;
 };
 
 export const useCanvasStore = create<CanvasState>()(

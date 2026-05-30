@@ -188,10 +188,66 @@ export function Canvas() {
                     /stylus|pen|s-pen/i.test((e as PointerEvent & { touchType?: string }).touchType || '') ||
                     /stylus|pen|s-pen/i.test(e.pointerType || '');
 
-      // Automatically switch to FREEHAND drawing tool when pen touches the screen and we are in select/hand mode
+      // Automatically switch to FREEHAND drawing tool when pen touches the screen
+      // and we are in select/hand mode — BUT only if pen is on empty space.
+      // If pen is touching an existing element, let the React handler manage
+      // selection, dragging, and resizing instead.
       if (isPen && (currentTool === 'select' || currentTool === 'hand')) {
         if (modeRef.current !== 'text-editing') {
-          store.setTool(ShapeType.FREEHAND);
+          // Hit-test: is the pen touching an existing element?
+          const vp = store.viewport;
+          const rect = canvas.getBoundingClientRect();
+          const sx = e.clientX - rect.left;
+          const sy = e.clientY - rect.top;
+          const wx = (sx - vp.x) / vp.zoom;
+          const wy = (sy - vp.y) / vp.zoom;
+
+          // Check connector handles of selected elements first
+          const selectedArr = Array.from(store.selectedIds);
+          const connHandleHit = hitTestConnectorHandles(wx, wy, store.elements, selectedArr, vp.zoom);
+
+          // Check if pen is touching any element
+          const elementHit = hitTestPoint(wx, wy, store.elements, vp);
+
+          // Also check if pen is touching a resize/rotate handle of the
+          // currently selected element (SelectionBox handles sit outside
+          // the element bbox, so hitTestPoint won't find them).
+          let hittingResizeHandle = false;
+          if (selectedArr.length > 0) {
+            const padding = 10 / vp.zoom;
+            const handleRadius = 12 / vp.zoom;
+            for (const sid of selectedArr) {
+              const sel = store.elements[sid];
+              if (!sel || sel.type === ShapeType.CONNECTOR) continue;
+              const minX = sel.x - padding;
+              const minY = sel.y - padding;
+              const maxX = sel.x + sel.width + padding;
+              const maxY = sel.y + sel.height + padding;
+              const midX = (minX + maxX) / 2;
+              const midY = (minY + maxY) / 2;
+              const rotateY = minY - 30 / vp.zoom;
+              const handlePositions = [
+                { x: minX, y: minY }, { x: midX, y: minY }, { x: maxX, y: minY },
+                { x: maxX, y: midY }, { x: maxX, y: maxY }, { x: midX, y: maxY },
+                { x: minX, y: maxY }, { x: minX, y: midY }, { x: midX, y: rotateY },
+              ];
+              for (const hp of handlePositions) {
+                if (Math.hypot(wx - hp.x, wy - hp.y) < handleRadius) {
+                  hittingResizeHandle = true;
+                  break;
+                }
+              }
+              if (hittingResizeHandle) break;
+            }
+          }
+
+          if (!connHandleHit && !elementHit && !hittingResizeHandle) {
+            // Pen is on empty space — auto-switch to freehand drawing
+            store.setTool(ShapeType.FREEHAND);
+          } else {
+            // Pen is touching an existing element or handle — let React handler manage it
+            return;
+          }
         }
       }
 
