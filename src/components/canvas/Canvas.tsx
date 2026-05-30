@@ -607,9 +607,14 @@ export function Canvas() {
 
 
   const handlePointerDown = (e: React.PointerEvent) => {
+    // If the active tool is freehand drawing, let the native listener handle it.
+    // We only allow middle click or hand tool panning.
+    if (tool === ShapeType.FREEHAND && e.button !== 1) {
+      return;
+    }
+
     const decision = gatePointerEvent(e.nativeEvent, inputMode.mode, inputMode.isTouchDevice);
-    if (decision === 'block-touch') return;
-    if (decision === 'block-pen') return;
+    if (decision === 'block-touch' || decision === 'block-pen') return;
 
     if (e.button === 2) return; // ignore right-click
 
@@ -871,6 +876,11 @@ export function Canvas() {
   };
 
   const handlePointerMove = (e: React.PointerEvent) => {
+    // If the active tool is freehand drawing and we are not in panning mode, let the native listener handle it.
+    if (tool === ShapeType.FREEHAND && modeRef.current !== 'panning') {
+      return;
+    }
+
     const decision = gatePointerEvent(e.nativeEvent, inputMode.mode, inputMode.isTouchDevice);
     if (decision === 'block-touch' || decision === 'block-pen') return;
 
@@ -1190,11 +1200,16 @@ export function Canvas() {
 
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const handlePointerUp = (e: React.PointerEvent) => {
-    const decision = gatePointerEvent(e.nativeEvent, inputMode.mode, inputMode.isTouchDevice);
-    if (decision === 'block-touch' || decision === 'block-pen') return;
-
+    // Always clear rejected pointers and gesture state first so we never leak pointer IDs!
     rejectedPointers.current.delete(e.pointerId);
     gestureHandler.onPointerUp(e.nativeEvent);
+
+    if (tool === ShapeType.FREEHAND && modeRef.current !== 'panning') {
+      return;
+    }
+
+    const decision = gatePointerEvent(e.nativeEvent, inputMode.mode, inputMode.isTouchDevice);
+    if (decision === 'block-touch' || decision === 'block-pen') return;
 
     const prevMode = modeRef.current;
 

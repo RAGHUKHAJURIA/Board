@@ -18,15 +18,24 @@ class PalmRejectionManager {
     // Returns true = ALLOW this pointer, false = REJECT (it's a palm)
     const nativeEvent = 'nativeEvent' in e ? e.nativeEvent : e;
 
+    const isPen = nativeEvent.pointerType === 'pen' || 
+                  (nativeEvent.tiltX !== undefined && nativeEvent.tiltX !== 0) || 
+                  (nativeEvent.tiltY !== undefined && nativeEvent.tiltY !== 0) || 
+                  (nativeEvent.pressure !== undefined && nativeEvent.pressure > 0 && nativeEvent.pressure !== 0.5 && nativeEvent.pressure !== 1) ||
+                  /stylus|pen|s-pen/i.test((nativeEvent as PointerEvent & { touchType?: string }).touchType || '') ||
+                  /stylus|pen|s-pen/i.test(nativeEvent.pointerType || '');
+
+    const type = isPen ? 'pen' : (nativeEvent.pointerType as ActivePointer['type']);
+
     this.activePointers.set(nativeEvent.pointerId, {
       id: nativeEvent.pointerId,
-      type: nativeEvent.pointerType as ActivePointer['type'],
+      type,
       startTime: nativeEvent.timeStamp,
       startX: nativeEvent.clientX,
       startY: nativeEvent.clientY,
     });
 
-    if (nativeEvent.pointerType === 'pen') {
+    if (isPen) {
       this.penActiveAt = nativeEvent.timeStamp;
       return true; // Always allow pen
     }

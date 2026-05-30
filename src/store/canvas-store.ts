@@ -2,7 +2,7 @@ import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import { immer } from 'zustand/middleware/immer';
 import { enableMapSet } from 'immer';
-import { WhiteboardElement, ConnectorElement, Viewport, Tool, ShapeType, IconElement } from '@/types';
+import { WhiteboardElement, ConnectorElement, Viewport, Tool, ShapeType, IconElement, FreehandElement } from '@/types';
 import type { CanvasInputMode, InputModeState } from '@/types/input';
 import { getElementBBox } from '@/lib/utils/geometry';
 import { ConnectorManager } from '@/lib/canvas/connectors';
@@ -375,7 +375,52 @@ export const useCanvasStore = create<CanvasState>()(
     }),
 
     updateElement: (id, updates) => set((state) => {
-      if (state.elements[id]) {
+      const el = state.elements[id];
+      if (el) {
+        if (el.type === ShapeType.FREEHAND) {
+          const fhEl = el as FreehandElement;
+          const fhUpdates = updates as Partial<FreehandElement>;
+          if (fhUpdates.points) {
+            const points = fhUpdates.points;
+            let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+            for (const pt of points) {
+              if (pt[0] < minX) minX = pt[0];
+              if (pt[0] > maxX) maxX = pt[0];
+              if (pt[1] < minY) minY = pt[1];
+              if (pt[1] > maxY) maxY = pt[1];
+            }
+            if (minX !== Infinity) {
+              fhUpdates.x = minX;
+              fhUpdates.y = minY;
+              fhUpdates.width = maxX - minX;
+              fhUpdates.height = maxY - minY;
+            }
+          } else if (
+            fhUpdates.x !== undefined ||
+            fhUpdates.y !== undefined ||
+            fhUpdates.width !== undefined ||
+            fhUpdates.height !== undefined
+          ) {
+            const oldX = fhEl.x;
+            const oldY = fhEl.y;
+            const oldW = fhEl.width || 1;
+            const oldH = fhEl.height || 1;
+
+            const newX = fhUpdates.x !== undefined ? fhUpdates.x : fhEl.x;
+            const newY = fhUpdates.y !== undefined ? fhUpdates.y : fhEl.y;
+            const newW = fhUpdates.width !== undefined ? fhUpdates.width : fhEl.width;
+            const newH = fhUpdates.height !== undefined ? fhUpdates.height : fhEl.height;
+
+            fhUpdates.points = fhEl.points.map(pt => {
+              const rx = (pt[0] - oldX) / oldW;
+              const ry = (pt[1] - oldY) / oldH;
+              const px = newX + rx * newW;
+              const py = newY + ry * newH;
+              return [px, py, pt[2]];
+            });
+          }
+        }
+
         const updated = { ...state.elements[id]!, ...updates } as typeof state.elements[string];
         updated.bbox = getElementBBox(updated);
         
@@ -615,6 +660,10 @@ export const useCanvasStore = create<CanvasState>()(
           y: el.y + 20,
           zIndex: Date.now() + Math.random(),
         } as typeof state.elements[string];
+        if (newEl.type === ShapeType.FREEHAND) {
+          const fh = newEl as FreehandElement;
+          fh.points = fh.points.map(pt => [pt[0] + 20, pt[1] + 20, pt[2]]);
+        }
         newEl.bbox = getElementBBox(newEl);
         state.elements[newId] = newEl;
         newIds.push(newId);
@@ -669,26 +718,40 @@ export const useCanvasStore = create<CanvasState>()(
         const el = state.elements[id];
         if (!el) return;
         
+        let targetX = el.x;
+        let targetY = el.y;
+
         switch (alignment) {
           case 'left':
-            state.elements[id]!.x = minX;
+            targetX = minX;
             break;
           case 'center-h':
-            state.elements[id]!.x = (minX + maxX) / 2 - el.width / 2;
+            targetX = (minX + maxX) / 2 - el.width / 2;
             break;
           case 'right':
-            state.elements[id]!.x = maxX - el.width;
+            targetX = maxX - el.width;
             break;
           case 'top':
-            state.elements[id]!.y = minY;
+            targetY = minY;
             break;
           case 'center-v':
-            state.elements[id]!.y = (minY + maxY) / 2 - el.height / 2;
+            targetY = (minY + maxY) / 2 - el.height / 2;
             break;
           case 'bottom':
-            state.elements[id]!.y = maxY - el.height;
+            targetY = maxY - el.height;
             break;
         }
+
+        if (el.type === ShapeType.FREEHAND) {
+          const fh = el as FreehandElement;
+          const dx = targetX - fh.x;
+          const dy = targetY - fh.y;
+          fh.points = fh.points.map(pt => [pt[0] + dx, pt[1] + dy, pt[2]]);
+        }
+
+        el.x = targetX;
+        el.y = targetY;
+        el.bbox = getElementBBox(el);
       });
     }),
 
