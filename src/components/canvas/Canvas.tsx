@@ -4,6 +4,7 @@ import React, { useEffect, useRef, useState, useCallback, useMemo } from 'react'
 import { useCanvasStore } from '@/store/canvas-store';
 import { useUIStore } from '@/store/ui-store';
 import { renderCanvas } from '@/lib/canvas/renderer';
+import { renderFreehand } from '@/lib/canvas/freehand';
 import { Point, ShapeType, WhiteboardElement, FreehandElement, ShapeElement, TextElement, ConnectorElement, ImageElement } from '@/types';
 import { isPointInBox } from '@/lib/utils/geometry';
 import { SelectionBox } from './SelectionBox';
@@ -21,6 +22,7 @@ import { hitTestPoint, hitTestConnectorHandles } from '@/lib/canvas/hit-testing'
 import { extractRawCoalescedPoints } from '@/lib/input/pointer-utils';
 import { gestureHandler } from '@/lib/input/gesture-handler';
 import { gatePointerEvent } from '@/lib/input/input-gate';
+import { isPenPointer } from '@/lib/input/pen-detect';
 import { getDeviceCapabilities } from '@/lib/input/device-detection';
 import { createActiveStroke, clearStrokeTimeout, type ActiveStroke, type CompletionReason } from '@/lib/canvas/stroke-state';
 import { PenCursor } from './PenCursor';
@@ -43,6 +45,9 @@ type InteractionMode =
 
 export function Canvas() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  // Live stroke draws here, on its own layer, so an in-progress stroke never
+  // forces a repaint of the whole board (see the native pointer handlers).
+  const overlayRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
 
   const elements = useCanvasStore(state => state.elements);
@@ -101,6 +106,13 @@ export function Canvas() {
 
   // ── Native freehand stroke tracking (bypasses React synthetic events) ──
   const activeStrokeRef = useRef<ActiveStroke | null>(null);
+  // Style/geometry shell for the stroke being drawn. It is deliberately NOT in
+  // the store until the pen lifts — see handleNativeFreehandDown.
+  const liveStrokeElRef = useRef<FreehandElement | null>(null);
+  const overlayDirtyRef = useRef(false);
+  // Element id whose stroke is still on the overlay, waiting for the main
+  // canvas to paint it before we clear the overlay (prevents a 1-frame blink).
+  const overlayHandoffRef = useRef<string | null>(null);
   // Minimum distance between points (world units) to prevent jitter
   const MIN_POINT_DISTANCE = 0.5;
 
@@ -130,9 +142,23 @@ export function Canvas() {
     });
   }, []);
 
+  const clearOverlay = useCallback(() => {
+    const ov = overlayRef.current;
+    const ctx = ov?.getContext('2d');
+    if (!ov || !ctx) return;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, ov.width, ov.height);
+  }, []);
+
   // ── Finalize stroke helper ──────────────────────────────────────────────
   // All completion paths (pointerup, pointercancel, lostpointercapture,
   // timeout, force-complete) funnel through this single function.
+  //
+  // This is the ONLY place a freehand stroke reaches the store. Committing
+  // points on every pointermove meant each move rebuilt the element record,
+  // re-rendered every store subscriber, and repainted the entire board —
+  // O(all points on the board) per move. Writing quickly saturated the main
+  // thread, which is what made the next pen-down get delivered late or dropped.
   const finalizeActiveStroke = useCallback((
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     _reason: CompletionReason
@@ -143,30 +169,44 @@ export function Canvas() {
     clearStrokeTimeout(stroke);
     stroke.phase = 'completing';
 
-    const store = useCanvasStore.getState();
-    const el = store.elements[stroke.elementId];
+    const shell = liveStrokeElRef.current;
+    activeStrokeRef.current = null;
+    liveStrokeElRef.current = null;
+    overlayDirtyRef.current = false;
 
-    if (el && el.type === ShapeType.FREEHAND) {
-      if (stroke.points.length < 2) {
-        // Single-point tap — too small to keep
-        store.deleteElements([stroke.elementId]);
-        store.clearSelection();
-      } else {
-        // Commit final points to the store
-        store.updateElement(stroke.elementId, {
-          points: [...stroke.points],
-        });
-        store.saveSnapshot();
-      }
+    if (shell && stroke.points.length >= 2) {
+      const store = useCanvasStore.getState();
+      // addElement already snapshots history, so one stroke = one undo step.
+      store.addElement({ ...shell, points: stroke.points });
+      store.selectElements([shell.id]);
+      // Hand the pixels over to the main canvas before wiping the overlay.
+      overlayHandoffRef.current = shell.id;
+    } else {
+      // Single-point tap — nothing worth keeping, and nothing to hand off.
+      clearOverlay();
     }
 
-    activeStrokeRef.current = null;
     if (modeRef.current === 'freehand') {
       currentElementRef.current = null;
       setMode('idle');
       setIsInteracting(false);
     }
-  }, [setIsInteracting, setMode]);
+  }, [clearOverlay, setIsInteracting, setMode]);
+
+  // Throw the in-progress stroke away (two-finger gesture took over, etc.)
+  const abortActiveStroke = useCallback(() => {
+    const stroke = activeStrokeRef.current;
+    if (stroke) clearStrokeTimeout(stroke);
+    activeStrokeRef.current = null;
+    liveStrokeElRef.current = null;
+    overlayDirtyRef.current = false;
+    clearOverlay();
+    if (modeRef.current === 'freehand') {
+      currentElementRef.current = null;
+      setMode('idle');
+      setIsInteracting(false);
+    }
+  }, [clearOverlay, setIsInteracting, setMode]);
 
   // ── Native freehand pointer listeners (bypass React synthetic events) ──
   // React's synthetic event system processes one event per render cycle and
@@ -180,13 +220,14 @@ export function Canvas() {
       const store = useCanvasStore.getState();
       const currentTool = store.tool;
 
-      // Support active/passive pens that report as touch but have pen characteristics:
-      const isPen = e.pointerType === 'pen' || 
-                    (e.tiltX !== undefined && e.tiltX !== 0) || 
-                    (e.tiltY !== undefined && e.tiltY !== 0) || 
-                    (e.pressure !== undefined && e.pressure > 0 && e.pressure !== 0.5 && e.pressure !== 1) ||
-                    /stylus|pen|s-pen/i.test((e as PointerEvent & { touchType?: string }).touchType || '') ||
-                    /stylus|pen|s-pen/i.test(e.pointerType || '');
+      // A second contact during a finger/stylus stroke is a pinch or a pan,
+      // not a stroke. Drop what was drawn and let the gesture handler take it.
+      if (activeStrokeRef.current && !e.isPrimary && activeStrokeRef.current.pointerType !== 'pen') {
+        abortActiveStroke();
+        return;
+      }
+
+      const isPen = isPenPointer(e);
 
       // Automatically switch to FREEHAND drawing tool when pen touches the screen
       // and we are in select/hand mode — BUT only if pen is on empty space.
@@ -285,7 +326,10 @@ export function Canvas() {
       const worldY = (screenY - vp.y) / vp.zoom;
       const pressure = e.pressure > 0 ? Math.max(0.1, e.pressure) : 0.5;
 
-      // Create the freehand element in the store
+      // Build the element but keep it OUT of the store until the pen lifts.
+      // store.addElement() clones the whole board for the undo snapshot, and
+      // doing that on pointerdown stalled the main thread at the exact moment
+      // the first points of the stroke were arriving.
       const id = uuidv4();
       const newEl: FreehandElement = {
         id,
@@ -299,11 +343,13 @@ export function Canvas() {
         zIndex: Date.now(),
         style: { ...useUIStore.getState().currentStyle },
         points: [[worldX, worldY, pressure]],
-        simulatePressure: e.pointerType !== 'pen',
+        // No real pressure channel (finger or capacitive stylus) → synthesise
+        // it from speed so those inputs still get a tapered, natural stroke.
+        simulatePressure: !isPen,
       };
-      store.addElement(newEl);
-      store.selectElements([id]);
+      liveStrokeElRef.current = newEl;
       currentElementRef.current = newEl;
+      overlayDirtyRef.current = true;
       setMode('freehand');
       setIsInteracting(true);
 
@@ -356,15 +402,9 @@ export function Canvas() {
 
       stroke.lastEventTime = performance.now();
 
-      // Update store element with accumulated points
-      store.updateElement(stroke.elementId, {
-        points: [...stroke.points],
-        simulatePressure: e.pointerType !== 'pen',
-      });
-      currentElementRef.current = {
-        ...currentElementRef.current!,
-        points: [...stroke.points],
-      } as FreehandElement;
+      // Repaint the overlay only — one stroke, not the whole board, and no
+      // store write, so nothing re-renders while the pen is down.
+      overlayDirtyRef.current = true;
     }
 
     function handleNativeFreehandUp(e: PointerEvent) {
@@ -373,7 +413,9 @@ export function Canvas() {
 
       e.preventDefault();
 
-      // Add final position (pressure 0 at lift = tapered stroke end)
+      // Add the lift position. Carry the last real pressure over instead of
+      // writing 0 — a zero-pressure sample collapses the stroke to zero width
+      // on top of the renderer's end taper, leaving a whisker on every stroke.
       const vp = useCanvasStore.getState().viewport;
       const rect = canvas.getBoundingClientRect();
       const worldX = (e.clientX - rect.left - vp.x) / vp.zoom;
@@ -381,7 +423,8 @@ export function Canvas() {
       const dx = worldX - stroke.lastX;
       const dy = worldY - stroke.lastY;
       if (Math.hypot(dx, dy) > 0.1) {
-        stroke.points.push([worldX, worldY, 0]);
+        const lastPressure = stroke.points[stroke.points.length - 1]?.[2] ?? 0.5;
+        stroke.points.push([worldX, worldY, lastPressure]);
       }
 
       finalizeActiveStroke('pointer-up');
@@ -420,7 +463,37 @@ export function Canvas() {
       canvas.removeEventListener('pointercancel', handleNativeFreehandCancel);
       canvas.removeEventListener('lostpointercapture', handleLostPointerCapture);
     };
-  }, [finalizeActiveStroke, setIsInteracting, setMode]);
+  }, [finalizeActiveStroke, abortActiveStroke, setIsInteracting, setMode]);
+
+  // ── Live-stroke overlay loop ────────────────────────────────────────────
+  // Redraws only the stroke currently under the pen, and only when new points
+  // arrived. Idle cost is one no-op rAF callback.
+  useEffect(() => {
+    let frame = 0;
+    const tick = () => {
+      frame = requestAnimationFrame(tick);
+      if (!overlayDirtyRef.current) return;
+      overlayDirtyRef.current = false;
+
+      const stroke = activeStrokeRef.current;
+      const shell = liveStrokeElRef.current;
+      const ov = overlayRef.current;
+      const ctx = ov?.getContext('2d');
+      if (!ov || !ctx || !stroke || !shell) return;
+
+      const vp = useCanvasStore.getState().viewport;
+      const dpr = window.devicePixelRatio || 1;
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.clearRect(0, 0, ov.width, ov.height);
+      ctx.scale(dpr, dpr);
+      ctx.translate(vp.x, vp.y);
+      ctx.scale(vp.zoom, vp.zoom);
+      // Same renderer as the committed stroke, so nothing shifts on commit.
+      renderFreehand(ctx, { ...shell, points: stroke.points } as FreehandElement);
+    };
+    tick();
+    return () => cancelAnimationFrame(frame);
+  }, []);
 
   // ── Window-level fallback listeners for missed pen-up events ───────────
   // iOS sometimes delivers pointerup to window instead of canvas
@@ -567,6 +640,13 @@ export function Canvas() {
       const ctx = canvasRef.current.getContext('2d');
       if (ctx) ctx.scale(dpr, dpr);
 
+      if (overlayRef.current) {
+        overlayRef.current.width = width * dpr;
+        overlayRef.current.height = height * dpr;
+        overlayRef.current.style.width = `${width}px`;
+        overlayRef.current.style.height = `${height}px`;
+      }
+
       updateViewport({ width, height });
     }
   }, [updateViewport]);
@@ -592,6 +672,13 @@ export function Canvas() {
         canvasBackground,
         resolvedTheme
       );
+
+      // The just-finished stroke is now on the main canvas, so the overlay copy
+      // can go. Doing this any earlier blinks the stroke for a frame.
+      if (overlayHandoffRef.current && elements[overlayHandoffRef.current]) {
+        overlayHandoffRef.current = null;
+        clearOverlay();
+      }
 
       // Draw rubber-band selection rectangle (Excalidraw style)
       if (selectionBox && modeRef.current === 'selecting') {
@@ -666,7 +753,7 @@ export function Canvas() {
 
     render();
     return () => cancelAnimationFrame(frameId);
-  }, [elements, selectedIds, viewport, grid, selectionBox, canvasBackground, resolvedTheme]);
+  }, [elements, selectedIds, viewport, grid, selectionBox, canvasBackground, resolvedTheme, clearOverlay]);
 
   // Screen → world
   const screenToWorld = (sx: number, sy: number): Point => ({
@@ -1700,6 +1787,14 @@ export function Canvas() {
           WebkitTouchCallout: 'none',
           cursor: 'crosshair',
         }}
+      />
+
+      {/* Live stroke layer — repainted alone while the pen is down.
+          pointer-events: none so every event still lands on the canvas above. */}
+      <canvas
+        ref={overlayRef}
+        className="absolute inset-0"
+        style={{ pointerEvents: 'none', touchAction: 'none' }}
       />
 
       {/* Selection box overlay */}

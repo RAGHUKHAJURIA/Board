@@ -122,11 +122,15 @@ const cloneElements = (elements: Record<string, WhiteboardElement>): Record<stri
     if (Object.prototype.hasOwnProperty.call(elements, id)) {
       const el = elements[id]!;
       
+      // Point arrays are never mutated in place — updateElement always assigns
+      // a fresh array — so snapshots can share the reference. Copying them made
+      // every undo snapshot cost O(all points on the board), which is what made
+      // each finished stroke stall on a page full of handwriting.
       let points: [number, number, number?][] | undefined;
       if (el.type === ShapeType.FREEHAND) {
-        points = [...(el as FreehandElement).points];
+        points = (el as FreehandElement).points;
       }
-      
+
       let controlPoints: { x: number; y: number }[] | undefined;
       if (el.type === ShapeType.CONNECTOR) {
         const conn = el as ConnectorElement;
@@ -384,8 +388,21 @@ export const useCanvasStore = create<CanvasState>()(
       state.history = newHistory;
       state.historyIndex = newHistory.length - 1;
       
-      const elWithBBox = { ...element, bbox: getElementBBox(element) };
-      state.elements[element.id] = elWithBBox as typeof state.elements[string];
+      const bbox = getElementBBox(element);
+      const elWithBBox = { ...element, bbox } as typeof state.elements[string];
+
+      // A freehand element's x/y/width/height are derived from its points.
+      // Only updateElement used to do this, so an element added with its final
+      // points (a completed stroke) kept width/height 0 — breaking hit testing,
+      // selection bounds, export and viewport culling.
+      if (element.type === ShapeType.FREEHAND && (element as FreehandElement).points.length > 0) {
+        elWithBBox.x = bbox.minX;
+        elWithBBox.y = bbox.minY;
+        elWithBBox.width = bbox.maxX - bbox.minX;
+        elWithBBox.height = bbox.maxY - bbox.minY;
+      }
+
+      state.elements[element.id] = elWithBBox;
 
       // Update connectors index if it's a connector
       if (element.type === ShapeType.CONNECTOR) {

@@ -50,8 +50,11 @@ function renderPen(
   const outline = getStroke(points as [number, number, number][], {
     size: baseWidth * 2,
     thinning: 0.5,
-    smoothing: 0.5,
-    streamline: 0.5,
+    // Digitizers sample with a little positional noise; streamline is
+    // perfect-freehand's exponential smoothing on the input points, so nudging
+    // it up removes handwriting wobble without visibly rounding letter corners.
+    smoothing: 0.62,
+    streamline: 0.62,
     easing: (t) => t,
     simulatePressure: simulatePressure !== false,
     start: { taper: taperStart !== undefined ? taperStart : 0, cap: true },

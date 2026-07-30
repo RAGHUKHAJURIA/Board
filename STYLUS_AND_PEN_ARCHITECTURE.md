@@ -23,24 +23,27 @@ graph TD
 ```
 
 ### I. Universal Input Gating & Multi-Stylus Recognition
-- **File**: [`src/lib/input/input-gate.ts`](file:///c:/work/Drawer/Board/src/lib/input/input-gate.ts)
-- **Problem**: Styluses on some platforms (like Samsung S-Pen or generic touch-emulating styluses) report as a generic `'touch'` pointer type in PointerEvents, which would be blocked by palm rejection in Pen Mode.
-- **Solution**: Evaluates multiple pointer characteristics to dynamically detect if a pointer is a pen, even if labeled as `'touch'`:
-  - **Direct Pointer Type**: `e.pointerType === 'pen'`
-  - **Tilt Detection**: `tiltX` or `tiltY` has a non-zero value.
-  - **Analog Pressure**: Active styluses report continuously varying analog pressures (values other than `0`, `0.5`, or `1.0`).
-  - **Vendor Strings**: Checked against vendor-specific event fields (e.g., `touchType` or `pointerType` containing `"stylus"`, `"s-pen"`, or `"pen"`).
-- **Behavior Matrix**:
-  | Mode | Stylus Input (Pen) | Finger Input (Skin Touch) | Mouse Input |
+- **Files**: [`src/lib/input/pen-detect.ts`](file:///c:/work/Drawer/Board/src/lib/input/pen-detect.ts) (detection), [`src/lib/input/input-gate.ts`](file:///c:/work/Drawer/Board/src/lib/input/input-gate.ts) (policy)
+- **Problem**: Styluses fall into two groups. *Digitizer pens* (Apple Pencil, S-Pen, Windows Ink/MPP, Wacom) are reported by the browser, though not always as `pointerType: 'pen'`. *Passive/capacitive styluses* are electrically a fingertip and are *indistinguishable from a finger at the event level* — no heuristic can find them.
+- **Detection** (`isPenPointer`, the single source of truth — this logic used to be copy-pasted in three files that had drifted apart):
+  - **Direct Pointer Type**: `e.pointerType === 'pen'`.
+  - **Digitizer-only fields**: non-zero `tiltX`/`tiltY`/`twist`/`tangentialPressure`. No finger reports any of these, so this catches S-Pens delivered as `'touch'`.
+  - **Vendor Strings**: `touchType` containing `"stylus"` or `"pen"`.
+  - **Pressure is deliberately NOT used.** Chrome on Android reports analog pressure for *finger* contacts, so the old `pressure !== 0.5 && pressure !== 1` test classified fingers as pens and silently broke both palm rejection and two-finger pan.
+- **Policy**: blocking every touch in Pen Mode is only correct once a real digitizer pen is known to exist. Doing it unconditionally is what made capacitive styluses — and tablets with no digitizer at all — unable to draw. So Pen Mode has two states:
+  | Mode | Digitizer Pen | Finger / Capacitive Stylus | Mouse |
   | :--- | :--- | :--- | :--- |
-  | **Pen Mode** | **Allowed** (Draws) | **Blocked** (Palm Rejection) | **Allowed** (Selects/Draws) |
-  | **Hand Mode** | **Allowed** (Draws) | **Allowed** (Draws/Interacts) | **Allowed** (Selects/Draws) |
+  | **Pen Mode**, no digitizer seen yet | n/a | **Allowed** — primary contact only, palm-sized contacts rejected | **Allowed** |
+  | **Pen Mode**, digitizer seen | **Allowed** | **Blocked** (palm rejection) | **Allowed** |
+  | **Hand Mode** | **Allowed** | **Allowed** | **Allowed** |
+- Secondary contacts (`!e.isPrimary`) are never strokes — they are pinch/pan. A second contact arriving mid-stroke discards the stroke and hands the gesture over.
 
 ---
 
 ### II. Dynamic Palm Rejection Engine
 - **File**: [`src/lib/input/palm-rejection.ts`](file:///c:/work/Drawer/Board/src/lib/input/palm-rejection.ts)
-- **Priority Window**: When drawing, users naturally rest their palm on the screen. The system monitors the time a pen lifts and blocks any finger touch events for a priority window of `500ms` (`PEN_PRIORITY_WINDOW_MS = 500`). This ensures that shifting hands or finger taps immediately following a pen stroke do not place accidental dots or lines.
+- **Priority Window**: When drawing, users naturally rest their palm on the screen. The system monitors the time a pen lifts and blocks finger touch events for `PEN_PRIORITY_WINDOW_MS = 250`. This was 500ms, which is longer than a lift-and-write cycle when writing quickly, so it swallowed the *next* stroke.
+- **Contact size**: `PALM_CONTACT_PX = 45` — the only signal available to separate a writing tip from a resting palm when no digitizer is present.
 
 ---
 
@@ -67,7 +70,30 @@ graph TD
 
 ---
 
-## 2. High-Performance Snapshot System
+## 2. Live Stroke Layer (the fix for dropped pen-downs when writing fast)
+
+- **Files**: [`src/components/canvas/Canvas.tsx`](file:///c:/work/Drawer/Board/src/components/canvas/Canvas.tsx), [`src/lib/canvas/renderer.ts`](file:///c:/work/Drawer/Board/src/lib/canvas/renderer.ts)
+
+### The problem
+The in-progress stroke used to be committed to the Zustand store on **every `pointermove`**. Each move therefore:
+1. rebuilt the element record and recomputed its bbox,
+2. re-rendered every store subscriber (including `AdvancedToolbar`, which subscribes without a selector),
+3. re-ran the render `useEffect` — whose dependency list contains `elements` — which synchronously repainted **the entire board**, re-tesselating every freehand stroke through `perfect-freehand`, and
+4. allocated a fresh `rough.canvas`, `RoughRenderer`, `ImageHandler` and `ConnectorManager` per frame.
+
+Cost per pointermove was therefore **O(all points on the board)**. On a page of handwriting this saturates the main thread, and the browser then delivers the next `pointerdown` late or drops the pointer stream entirely — which is exactly the "I lift the pen and write fast and it misses the stroke" symptom. `addElement` also took a full history snapshot *on pointerdown*, stalling the thread at the precise moment the first points were arriving.
+
+### The fix
+- **Two layers.** A second `<canvas>` sits above the board with `pointer-events: none`. While the pen is down, only that overlay repaints, drawing only the current stroke — **O(current stroke)**, not O(board).
+- **The store is untouched during a stroke.** The element lives in a ref and reaches the store exactly once, on pen-up. Zero React renders between pen-down and pen-up.
+- **One undo step per stroke.** Previously `addElement` (down) *and* `saveSnapshot` (up) each pushed history, so undo needed two presses per stroke and the intermediate state was a one-point stroke.
+- **Hand-off, not blink.** The overlay is cleared only after the main canvas has painted the committed element (`overlayHandoffRef`), so there is no one-frame gap.
+- **Same renderer both sides.** The overlay calls `renderFreehand`, so the live stroke and the committed stroke are pixel-identical — nothing shifts on commit.
+- **Viewport culling** in `renderCanvas`, and per-canvas caching of the four render helpers that were being reallocated 240×/second.
+
+---
+
+## 3. High-Performance Snapshot System
 
 - **File**: [`src/store/canvas-store.ts`](file:///c:/work/Drawer/Board/src/store/canvas-store.ts)
 
@@ -113,3 +139,6 @@ const cloneElements = (elements: Record<string, WhiteboardElement>): Record<stri
 };
 ```
 This reduces the cloning operation to **< 1ms**, ensuring that the main thread is never blocked and fast pen strokes are captured instantly.
+
+### Shared point arrays
+`cloneElements` used to copy every freehand `points` array (`points = [...el.points]`), so a snapshot still cost **O(all points on the board)** — and one is taken per stroke, up to 100 deep. Point arrays are never mutated in place (`updateElement` always assigns a fresh array), so snapshots now **share the reference** and cost O(number of elements) instead. Undo/redo behaviour is unchanged.

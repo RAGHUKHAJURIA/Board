@@ -1,3 +1,5 @@
+import { isPenPointer } from './pen-detect';
+
 interface ActivePointer {
   id: number;
   type: 'pen' | 'touch' | 'mouse';
@@ -10,21 +12,19 @@ class PalmRejectionManager {
   private activePointers = new Map<number, ActivePointer>();
   private penActiveAt: number | null = null; // timestamp when pen last touched
 
-  // How long after pen lifts to still reject touch (ms)
-  // Apple Pencil users rest palm while drawing - we reject touch for 500ms after pen lifts
-  private readonly PEN_PRIORITY_WINDOW_MS = 500;
+  // How long after the pen lifts to still reject touch (ms).
+  // Users rest a palm while drawing, so touches right after a pen stroke are
+  // almost always palm. 500ms was long enough to eat the next stroke when
+  // writing quickly — a lift-and-write cycle is ~200ms.
+  // ponytail: fixed window. Derive it from observed lift/re-touch timing only
+  // if palm dots still get through at 250ms.
+  private readonly PEN_PRIORITY_WINDOW_MS = 250;
 
   onPointerDown(e: PointerEvent | React.PointerEvent): boolean {
     // Returns true = ALLOW this pointer, false = REJECT (it's a palm)
     const nativeEvent = 'nativeEvent' in e ? e.nativeEvent : e;
 
-    const isPen = nativeEvent.pointerType === 'pen' || 
-                  (nativeEvent.tiltX !== undefined && nativeEvent.tiltX !== 0) || 
-                  (nativeEvent.tiltY !== undefined && nativeEvent.tiltY !== 0) || 
-                  (nativeEvent.pressure !== undefined && nativeEvent.pressure > 0 && nativeEvent.pressure !== 0.5 && nativeEvent.pressure !== 1) ||
-                  /stylus|pen|s-pen/i.test((nativeEvent as PointerEvent & { touchType?: string }).touchType || '') ||
-                  /stylus|pen|s-pen/i.test(nativeEvent.pointerType || '');
-
+    const isPen = isPenPointer(nativeEvent);
     const type = isPen ? 'pen' : (nativeEvent.pointerType as ActivePointer['type']);
 
     this.activePointers.set(nativeEvent.pointerId, {

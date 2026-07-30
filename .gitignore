@@ -37,3 +37,4 @@ yarn-error.log*
 *.tsbuildinfo
 next-env.d.ts
 ARROW_FEATURE_DOCS.md
+STYLUS_AND_PEN_ARCHITECTURE.md

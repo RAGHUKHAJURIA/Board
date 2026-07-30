@@ -7,6 +7,29 @@ import { ConnectorManager } from './connectors';
 import { RoughRenderer } from './rough-renderer';
 import { drawIconElement, getIconBitmapSync, getIconBitmap } from './icon-renderer';
 
+// These were re-allocated on every frame — 240 throwaway objects a second at
+// 60fps, all of them stateless. Cache them per canvas node instead.
+let helperCanvas: HTMLCanvasElement | null = null;
+let helpers: {
+  rc: ReturnType<typeof rough.canvas>;
+  roughRenderer: RoughRenderer;
+  imageHandler: ImageHandler;
+  connectorManager: ConnectorManager;
+} | null = null;
+
+const getRenderHelpers = (canvas: HTMLCanvasElement) => {
+  if (helperCanvas !== canvas || !helpers) {
+    helperCanvas = canvas;
+    helpers = {
+      rc: rough.canvas(canvas),
+      roughRenderer: new RoughRenderer(canvas),
+      imageHandler: new ImageHandler(),
+      connectorManager: new ConnectorManager(),
+    };
+  }
+  return helpers;
+};
+
 export const renderCanvas = (
   canvas: HTMLCanvasElement,
   elements: WhiteboardElement[],
@@ -40,18 +63,37 @@ export const renderCanvas = (
   // Sort elements by z-index
   const sortedElements = [...elements].sort((a, b) => a.zIndex - b.zIndex);
 
-  const rc = rough.canvas(canvas);
-  
-  const imageHandler = new ImageHandler();
-  // Using imported RoughRenderer to draw connectors
-  const roughRenderer = new RoughRenderer(canvas);
-  const connectorManager = new ConnectorManager();
+  const { rc, roughRenderer, imageHandler, connectorManager } = getRenderHelpers(canvas);
   const elementsMap = new Map(elements.map(e => [e.id, e]));
+
+  // Viewport culling. Every visible freehand stroke is re-tesselated by
+  // perfect-freehand on each frame, so a full page of handwriting costs
+  // O(all points on the board) per frame without this.
+  const dpr = typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1;
+  const viewW = viewport.width || canvas.width / dpr;
+  const viewH = viewport.height || canvas.height / dpr;
+  const slack = 64 / viewport.zoom; // stroke width + taper overshoot
+  const cullMinX = -viewport.x / viewport.zoom - slack;
+  const cullMinY = -viewport.y / viewport.zoom - slack;
+  const cullMaxX = cullMinX + viewW / viewport.zoom + slack * 2;
+  const cullMaxY = cullMinY + viewH / viewport.zoom + slack * 2;
 
   // Render Elements
   sortedElements.forEach((element) => {
-    
-    // In a real app we would do viewport culling here
+
+    // Connectors are exempt: their x/y/width/height don't bound the drawn path.
+    if (element.type !== ShapeType.CONNECTOR) {
+      // A rotated element sweeps outside its axis-aligned box, by at most half
+      // its diagonal.
+      const spin = element.rotation ? Math.hypot(element.width, element.height) / 2 : 0;
+      if (
+        element.x - spin > cullMaxX ||
+        element.y - spin > cullMaxY ||
+        element.x + element.width + spin < cullMinX ||
+        element.y + element.height + spin < cullMinY
+      ) return;
+    }
+
     ctx.save();
 
     if (element.rotation) {
