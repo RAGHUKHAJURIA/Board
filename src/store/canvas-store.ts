@@ -413,10 +413,13 @@ export const useCanvasStore = create<CanvasState>()(
 
     setTool: (tool) => set((state) => {
       state.tool = tool;
-      // Clear selection when switching to select tool so nothing is pre-selected
-      if (tool === 'select') {
-        state.selectedIds.clear();
-      }
+      // Reaching for a drawing tool means you are done with the current
+      // selection; reaching for select/lasso/hand means you want to work with
+      // it. This used to clear on switching TO select, which threw away the
+      // selection a lasso had just made and lost the selection every time you
+      // pressed V after drawing something.
+      const keepsSelection = tool === 'select' || tool === 'lasso' || tool === 'hand';
+      if (!keepsSelection) state.selectedIds.clear();
     }),
 
 

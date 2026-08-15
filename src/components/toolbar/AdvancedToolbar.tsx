@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useDragControls } from 'framer-motion';
 import { createPortal } from 'react-dom';
 import { motion, AnimatePresence } from 'framer-motion';
@@ -30,6 +30,7 @@ import {
   X,
   Plus,
   Highlighter,
+  Lasso,
 } from 'lucide-react';
 import { ShapeType } from '@/types';
 
@@ -39,14 +40,18 @@ import { ShapeType } from '@/types';
 function PenPanel({
   penType,
   stroke,
+  variability,
   onPenType,
   onColor,
+  onVariability,
   onClose,
 }: {
   penType: string;
   stroke: string;
+  variability: 'variable' | 'constant';
   onPenType: (p: string) => void;
   onColor: (c: string) => void;
+  onVariability: (v: 'variable' | 'constant') => void;
   onClose: () => void;
 }) {
   return (
@@ -79,6 +84,30 @@ function PenPanel({
             }`}
           >
             {pt.charAt(0).toUpperCase() + pt.slice(1)}
+          </button>
+        ))}
+      </div>
+
+      <div className="w-full h-px bg-zinc-200 dark:bg-zinc-700 mb-3" />
+
+      {/* Width variability */}
+      <div className="text-[11px] font-semibold text-zinc-500 uppercase tracking-wider mb-2">Stroke width</div>
+      <div className="flex gap-1.5 mb-3">
+        {([
+          { id: 'variable' as const, label: 'Variable', hint: 'Tapers with pressure' },
+          { id: 'constant' as const, label: 'Constant', hint: 'One width throughout' },
+        ]).map((v) => (
+          <button
+            key={v.id}
+            onClick={(e) => { e.stopPropagation(); onVariability(v.id); }}
+            title={v.hint}
+            className={`flex-1 text-[11px] py-1.5 rounded-md transition-colors ${
+              variability === v.id
+                ? 'bg-foreground text-background font-medium'
+                : 'text-foreground hover:bg-zinc-100 dark:hover:bg-zinc-800 border border-zinc-300 dark:border-zinc-700'
+            }`}
+          >
+            {v.label}
           </button>
         ))}
       </div>
@@ -205,11 +234,67 @@ function EraserPanel({
 }
 
 /* ─────────────────────────────────────────────────────────
-   Quick colour strip — sits either side of the pen tool so a
-   colour can be picked before reaching for the pen and again
-   once the pen is already selected.
+   Lasso Settings Panel
 ───────────────────────────────────────────────────────── */
-const QUICK_COLORS = ['#e2e8f0', '#f43f5e', '#22c55e', '#3b82f6', '#eab308'];
+function LassoPanel({
+  mode,
+  onMode,
+  onClose,
+}: {
+  mode: 'contain' | 'intersect';
+  onMode: (m: 'contain' | 'intersect') => void;
+  onClose: () => void;
+}) {
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: -8, scale: 0.96 }}
+      animate={{ opacity: 1, y: 0, scale: 1 }}
+      exit={{ opacity: 0, y: -8, scale: 0.96 }}
+      transition={{ duration: 0.15 }}
+      className="fixed top-4 right-4 z-[200] bg-white dark:bg-[#1a1a1e] border border-zinc-200 dark:border-zinc-700 rounded-2xl shadow-2xl p-4 w-[210px]"
+      onPointerDown={(e) => e.stopPropagation()}
+    >
+      <div className="flex items-center justify-between mb-3">
+        <span className="text-[11px] font-semibold text-zinc-500 uppercase tracking-wider">Lasso</span>
+        <button onClick={onClose} className="text-zinc-400 hover:text-foreground transition-colors p-0.5 rounded">
+          <X size={13} />
+        </button>
+      </div>
+
+      <div className="flex flex-col gap-1.5">
+        <button
+          onClick={(e) => { e.stopPropagation(); onMode('contain'); }}
+          className={`text-left px-3 py-2 rounded-lg text-xs transition-colors ${
+            mode === 'contain'
+              ? 'bg-foreground text-background font-medium'
+              : 'text-foreground hover:bg-zinc-100 dark:hover:bg-zinc-800 border border-transparent'
+          }`}
+        >
+          <div className="font-medium">Enclose</div>
+          <div className="text-[10px] text-zinc-500 mt-0.5">Only what the loop surrounds</div>
+        </button>
+        <button
+          onClick={(e) => { e.stopPropagation(); onMode('intersect'); }}
+          className={`text-left px-3 py-2 rounded-lg text-xs transition-colors ${
+            mode === 'intersect'
+              ? 'bg-foreground text-background font-medium'
+              : 'text-foreground hover:bg-zinc-100 dark:hover:bg-zinc-800 border border-transparent'
+          }`}
+        >
+          <div className="font-medium">Touch</div>
+          <div className="text-[10px] text-zinc-500 mt-0.5">Anything the loop crosses too</div>
+        </button>
+      </div>
+    </motion.div>
+  );
+}
+
+/* ─────────────────────────────────────────────────────────
+   Quick colour strip — sits just before the pen, so a colour is
+   in reach without opening the full picker (which sits after the
+   tools and covers the "after the pen" case).
+───────────────────────────────────────────────────────── */
+const QUICK_COLORS = ['#e2e8f0', '#f43f5e', '#22c55e', '#3b82f6'];
 
 function QuickColors({
   vertical,
@@ -222,8 +307,8 @@ function QuickColors({
 }) {
   return (
     <div
-      // Two columns when vertical: five stacked swatches would push the tools
-      // below the fold on a tablet-height toolbar.
+      // 2×2 when vertical. Five stacked swatches — let alone the two strips
+      // this had either side of the pen — ran the toolbar off the screen.
       className={`${vertical ? 'grid grid-cols-2 place-items-center py-1' : 'flex flex-row items-center px-1'} gap-1 shrink-0`}
     >
       {QUICK_COLORS.map((c) => (
@@ -241,6 +326,109 @@ function QuickColors({
         />
       ))}
     </div>
+  );
+}
+
+/* ─────────────────────────────────────────────────────────
+   Shape picker — one button standing in for six.
+───────────────────────────────────────────────────────── */
+const SHAPE_TOOLS = [
+  { id: ShapeType.RECTANGLE, icon: Square, label: 'Rectangle (R)' },
+  { id: ShapeType.CIRCLE, icon: Circle, label: 'Ellipse (O)' },
+  { id: ShapeType.TRIANGLE, icon: Triangle, label: 'Triangle' },
+  { id: ShapeType.DIAMOND, icon: Diamond, label: 'Diamond' },
+  { id: ShapeType.STAR, icon: Star, label: 'Star' },
+  { id: ShapeType.HEXAGON, icon: Hexagon, label: 'Hexagon' },
+] as const;
+
+function ShapePicker({
+  vertical,
+  activeShape,
+  isActive,
+  onPick,
+}: {
+  vertical: boolean;
+  activeShape: (typeof SHAPE_TOOLS)[number];
+  isActive: boolean;
+  onPick: (id: ShapeType) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const buttonRef = useRef<HTMLButtonElement>(null);
+  const [pos, setPos] = useState({ top: 0, left: 0 });
+
+  // Portalled, because the toolbar scrolls and would clip an absolute child.
+  const place = useCallback(() => {
+    const rect = buttonRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    setPos(
+      vertical
+        ? { top: rect.top, left: rect.right + 8 }
+        : { top: rect.top - 8 - 44, left: rect.left }
+    );
+  }, [vertical]);
+
+  useEffect(() => {
+    if (!open) return;
+    place();
+    const close = (e: PointerEvent) => {
+      if (!buttonRef.current?.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener('pointerdown', close);
+    window.addEventListener('resize', place);
+    return () => {
+      document.removeEventListener('pointerdown', close);
+      window.removeEventListener('resize', place);
+    };
+  }, [open, place]);
+
+  const Icon = activeShape.icon;
+
+  return (
+    <>
+      <button
+        ref={buttonRef}
+        onClick={(e) => {
+          e.stopPropagation();
+          onPick(activeShape.id);
+          setOpen((v) => !v);
+        }}
+        className={`p-1.5 rounded transition-colors relative shrink-0 flex items-center justify-center ${
+          isActive ? 'bg-foreground text-background' : 'text-foreground hover:bg-zinc-100 dark:hover:bg-zinc-800'
+        }`}
+        title="Shapes"
+      >
+        <Icon size={18} />
+        {/* Corner nub marking this as a group of tools */}
+        <span className="absolute bottom-0.5 right-0.5 w-1 h-1 rounded-full bg-current opacity-50" />
+      </button>
+
+      {open && typeof window !== 'undefined' && createPortal(
+        <div
+          className="fixed z-[200] flex flex-row gap-0.5 p-1 rounded-xl bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 shadow-xl"
+          style={{ top: pos.top, left: pos.left }}
+          onPointerDown={(e) => e.stopPropagation()}
+        >
+          {SHAPE_TOOLS.map((s) => {
+            const SIcon = s.icon;
+            return (
+              <button
+                key={s.id}
+                onClick={() => { onPick(s.id); setOpen(false); }}
+                title={s.label}
+                className={`p-1.5 rounded transition-colors ${
+                  activeShape.id === s.id
+                    ? 'bg-foreground text-background'
+                    : 'text-foreground hover:bg-zinc-100 dark:hover:bg-zinc-800'
+                }`}
+              >
+                <SIcon size={18} />
+              </button>
+            );
+          })}
+        </div>,
+        document.body
+      )}
+    </>
   );
 }
 
@@ -269,11 +457,36 @@ export function AdvancedToolbar() {
   const penType = currentStyle.penType || 'pen';
   const updateCurrentStyle = useUIStore((state) => state.updateCurrentStyle);
 
-  const [orientation, setOrientation] = useState<'vertical' | 'horizontal'>('vertical');
+  // null = follow the viewport; set once the user picks an orientation by hand.
+  const [orientationOverride, setOrientationOverride] = useState<'vertical' | 'horizontal' | null>(null);
+  const [autoOrientation, setAutoOrientation] = useState<'vertical' | 'horizontal'>('vertical');
+  const [lastShape, setLastShape] = useState<ShapeType>(ShapeType.RECTANGLE);
   const dragControls = useDragControls();
 
-  // Which tool panel is open: 'pen' | 'eraser' | null
-  const [openPanel, setOpenPanel] = useState<'pen' | 'eraser' | null>(null);
+  // A column of tools does not fit on a phone, or on a tablet held in
+  // landscape: below these sizes the bar lies down along the bottom instead.
+  useEffect(() => {
+    const pick = () => {
+      const tooNarrow = window.innerWidth < 640;
+      const tooShort = window.innerHeight < 720;
+      setAutoOrientation(tooNarrow || tooShort ? 'horizontal' : 'vertical');
+    };
+    pick();
+    window.addEventListener('resize', pick);
+    window.addEventListener('orientationchange', pick);
+    return () => {
+      window.removeEventListener('resize', pick);
+      window.removeEventListener('orientationchange', pick);
+    };
+  }, []);
+
+  const orientation = orientationOverride ?? autoOrientation;
+  const setOrientation = setOrientationOverride;
+
+  // Which tool panel is open
+  const [openPanel, setOpenPanel] = useState<'pen' | 'eraser' | 'lasso' | null>(null);
+  const lassoMode = useUIStore((s) => s.lassoMode);
+  const setLassoMode = useUIStore((s) => s.setLassoMode);
 
   // Close panel when user starts drawing or switches to a non-panel tool
   useEffect(() => {
@@ -285,6 +498,7 @@ export function AdvancedToolbar() {
   useEffect(() => {
     if (tool !== ShapeType.FREEHAND && openPanel === 'pen') setOpenPanel(null);
     if (tool !== 'eraser' && openPanel === 'eraser') setOpenPanel(null);
+    if (tool !== 'lasso' && openPanel === 'lasso') setOpenPanel(null);
   }, [tool]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleColorChange = (c: string) => {
@@ -301,15 +515,12 @@ export function AdvancedToolbar() {
 
   const tools = [
     { id: 'select', icon: MousePointer, label: 'Select (V)' },
+    { id: 'lasso', icon: Lasso, label: 'Lasso select (Q)' },
     { id: 'hand', icon: Hand, label: 'Hand (H)' },
     null,
-    { id: ShapeType.RECTANGLE, icon: Square, label: 'Rectangle (R)' },
-    { id: ShapeType.CIRCLE, icon: Circle, label: 'Circle (O)' },
-    { id: ShapeType.TRIANGLE, icon: Triangle, label: 'Triangle' },
-    { id: ShapeType.DIAMOND, icon: Diamond, label: 'Diamond' },
-    { id: ShapeType.STAR, icon: Star, label: 'Star' },
-    { id: ShapeType.HEXAGON, icon: Hexagon, label: 'Hexagon' },
-    null,
+    // The six shapes live behind one button now — as a flat list they were a
+    // third of the toolbar's height on their own.
+    { id: 'shapes', icon: Square, label: 'Shapes' },
     { id: ShapeType.LINE, icon: Minus, label: 'Line (L)' },
     { id: ShapeType.ARROW, icon: ArrowRight, label: 'Arrow (A)' },
     null,
@@ -320,6 +531,12 @@ export function AdvancedToolbar() {
     { id: 'eraser', icon: Eraser, label: 'Eraser (E)' },
     { id: 'laser', icon: Highlighter, label: 'Laser pointer (K)' },
   ];
+
+  // Remember which shape the picker last used, so its button keeps that icon.
+  const activeShape =
+    SHAPE_TOOLS.find((s) => s.id === tool) ??
+    SHAPE_TOOLS.find((s) => s.id === lastShape) ??
+    SHAPE_TOOLS[0];
 
   const isVertical = orientation === 'vertical';
 
@@ -334,8 +551,24 @@ export function AdvancedToolbar() {
         : <div key={i} className="h-5 w-px bg-zinc-200 dark:bg-zinc-800 mx-0.5 shrink-0" />;
     }
 
+    if (t.id === 'shapes') {
+      return (
+        <ShapePicker
+          key="shapes"
+          vertical={isVertical}
+          activeShape={activeShape}
+          isActive={SHAPE_TOOLS.some((s) => s.id === tool)}
+          onPick={(id) => {
+            setLastShape(id);
+            setTool(id);
+            setOpenPanel(null);
+          }}
+        />
+      );
+    }
+
     const Icon = t.icon;
-    
+
     // For icon picker, it's not a persistent "tool" in the same way, but it behaves like an open modal
     const isActive = t.id === 'icon-picker' ? isIconPickerOpen : tool === t.id;
 
@@ -353,6 +586,8 @@ export function AdvancedToolbar() {
         setOpenPanel((prev) => (prev === 'pen' ? null : 'pen'));
       } else if (t.id === 'eraser') {
         setOpenPanel((prev) => (prev === 'eraser' ? null : 'eraser'));
+      } else if (t.id === 'lasso') {
+        setOpenPanel((prev) => (prev === 'lasso' ? null : 'lasso'));
       } else {
         setOpenPanel(null);
       }
@@ -378,14 +613,13 @@ export function AdvancedToolbar() {
       </button>
     );
 
-    // Colour swatches flank the pen so one is always in reach, whether you
-    // pick the colour first or the pen first.
+    // Quick colours immediately before the pen; the full picker sits after the
+    // tools, so a colour is reachable on either side of choosing the pen.
     if (t.id === ShapeType.FREEHAND) {
       return (
         <React.Fragment key={t.id}>
           <QuickColors vertical={isVertical} stroke={currentStyle.stroke} onColor={handleColorChange} />
           {button}
-          <QuickColors vertical={isVertical} stroke={currentStyle.stroke} onColor={handleColorChange} />
         </React.Fragment>
       );
     }
@@ -401,8 +635,10 @@ export function AdvancedToolbar() {
           key="pen-panel"
           penType={penType}
           stroke={currentStyle.stroke}
+          variability={currentStyle.strokeVariability ?? 'variable'}
           onPenType={(pt) => { updateCurrentStyle({ penType: pt as 'pen' | 'pencil' | 'fountain' | 'marker' | 'highlighter' }); setTool(ShapeType.FREEHAND); }}
           onColor={(c) => { handleColorChange(c); setTool(ShapeType.FREEHAND); }}
+          onVariability={(v) => { updateCurrentStyle({ strokeVariability: v }); setTool(ShapeType.FREEHAND); }}
           onClose={() => setOpenPanel(null)}
         />
       )}
@@ -413,6 +649,14 @@ export function AdvancedToolbar() {
           size={eraserSettings.size}
           onMode={(m) => setEraserMode(m)}
           onSize={(s) => setEraserSize(s)}
+          onClose={() => setOpenPanel(null)}
+        />
+      )}
+      {openPanel === 'lasso' && (
+        <LassoPanel
+          key="lasso-panel"
+          mode={lassoMode}
+          onMode={(m) => setLassoMode(m)}
           onClose={() => setOpenPanel(null)}
         />
       )}
@@ -429,50 +673,60 @@ export function AdvancedToolbar() {
           dragControls={dragControls}
           dragListener={false}
           dragMomentum={false}
-          className="fixed left-3 bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-xl shadow-lg p-1.5 flex flex-col gap-0.5 z-50 pointer-events-auto outline-none overflow-y-auto no-scrollbar"
-          style={{ width: '44px', top: '72px', maxHeight: 'calc(var(--app-height, 100vh) - 100px)' }}
+          className="fixed left-3 bg-white/95 dark:bg-zinc-900/95 backdrop-blur-md border border-zinc-200 dark:border-zinc-800 rounded-2xl shadow-lg p-1 flex flex-col gap-0.5 z-50 pointer-events-auto outline-none overflow-y-auto no-scrollbar"
+          style={{
+            width: '46px',
+            // Vertically centred via auto margins rather than a translate:
+            // framer-motion drives dragging through `transform`, so a
+            // translateY(-50%) here would be wiped out on the first drag and
+            // the bar would jump by half its height.
+            top: 0,
+            bottom: 0,
+            marginTop: 'auto',
+            marginBottom: 'auto',
+            height: 'max-content',
+            maxHeight: 'calc(var(--app-height, 100vh) - 140px)',
+          }}
         >
-          {/* Drag handle — only this initiates drag */}
-          <div
-            className="w-full flex justify-center py-0.5 text-zinc-400 hover:text-zinc-200 cursor-grab active:cursor-grabbing shrink-0"
-            onPointerDown={(e) => dragControls.start(e)}
-          >
-            <GripHorizontal size={14} />
+          {/* Header: drag grip and orientation toggle share one row */}
+          <div className="flex items-center justify-between px-0.5 shrink-0">
+            <div
+              className="p-1 text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-200 cursor-grab active:cursor-grabbing"
+              onPointerDown={(e) => dragControls.start(e)}
+              title="Drag toolbar"
+            >
+              <GripHorizontal size={12} />
+            </div>
+            <button
+              onClick={() => setOrientation('horizontal')}
+              className="p-1 rounded hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors text-zinc-400 dark:text-zinc-500"
+              title="Switch to horizontal toolbar"
+            >
+              <LayoutDashboard size={12} />
+            </button>
           </div>
 
           {/* All other content stops propagation so clicks don't trigger drag */}
-          <div onPointerDown={(e) => e.stopPropagation()}>
-            {/* Orientation toggle */}
-            <button
-              onClick={() => setOrientation('horizontal')}
-              className="p-1.5 rounded hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors text-zinc-400 dark:text-zinc-500 shrink-0 relative group flex justify-center w-full"
-              title="Switch to horizontal toolbar"
-            >
-              <LayoutDashboard size={14} />
-              <div className="absolute left-full ml-2 top-1/2 -translate-y-1/2 bg-zinc-900 text-white text-xs px-2 py-1 rounded whitespace-nowrap opacity-0 group-hover:opacity-100 pointer-events-none transition-opacity z-50">
-                Horizontal mode
-              </div>
-            </button>
-
-            <div className="w-full h-px bg-zinc-200 dark:bg-zinc-800 my-0.5 shrink-0" />
-
-            {/* Undo/Redo */}
-            <button
-              onClick={() => canUndo && undo()}
-              className={`p-1.5 rounded transition-colors shrink-0 flex justify-center w-full ${canUndo ? 'text-zinc-600 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800' : 'text-zinc-300 dark:text-zinc-700 cursor-not-allowed'}`}
-              title="Undo (Ctrl+Z)"
-              disabled={!canUndo}
-            >
-              <Undo2 size={18} />
-            </button>
-            <button
-              onClick={() => canRedo && redo()}
-              className={`p-1.5 rounded transition-colors shrink-0 flex justify-center w-full ${canRedo ? 'text-zinc-600 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800' : 'text-zinc-300 dark:text-zinc-700 cursor-not-allowed'}`}
-              title="Redo (Ctrl+Y)"
-              disabled={!canRedo}
-            >
-              <Redo2 size={18} />
-            </button>
+          <div onPointerDown={(e) => e.stopPropagation()} className="flex flex-col gap-0.5">
+            {/* Undo/Redo, side by side to save a row */}
+            <div className="flex items-center justify-center gap-0.5 shrink-0">
+              <button
+                onClick={() => canUndo && undo()}
+                className={`p-1 rounded transition-colors ${canUndo ? 'text-zinc-600 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800' : 'text-zinc-300 dark:text-zinc-700 cursor-not-allowed'}`}
+                title="Undo (Ctrl+Z)"
+                disabled={!canUndo}
+              >
+                <Undo2 size={15} />
+              </button>
+              <button
+                onClick={() => canRedo && redo()}
+                className={`p-1 rounded transition-colors ${canRedo ? 'text-zinc-600 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800' : 'text-zinc-300 dark:text-zinc-700 cursor-not-allowed'}`}
+                title="Redo (Ctrl+Y)"
+                disabled={!canRedo}
+              >
+                <Redo2 size={15} />
+              </button>
+            </div>
 
             <div className="w-full h-px bg-zinc-200 dark:bg-zinc-800 my-0.5 shrink-0" />
 
@@ -483,7 +737,7 @@ export function AdvancedToolbar() {
 
             {/* Global Color */}
             <div className="w-full h-px bg-zinc-200 dark:bg-zinc-800 my-0.5 shrink-0" />
-            <div className="flex flex-col items-center py-0.5 shrink-0">
+            <div className="flex flex-col items-center pb-0.5 shrink-0">
               <ColorPicker
                 color={currentStyle.stroke}
                 onChange={handleColorChange}
@@ -509,31 +763,30 @@ export function AdvancedToolbar() {
         dragControls={dragControls}
         dragListener={false}
         dragMomentum={false}
-        className="fixed left-0 right-0 mx-auto bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-xl shadow-lg px-2 py-1.5 flex flex-row items-center gap-0.5 z-50 pointer-events-auto outline-none max-w-[calc(100vw-32px)] overflow-x-auto no-scrollbar"
-        style={{ width: 'max-content', bottom: 'calc(80px + env(safe-area-inset-bottom, 0px))' }}
+        className="fixed left-0 right-0 mx-auto bg-white/95 dark:bg-zinc-900/95 backdrop-blur-md border border-zinc-200 dark:border-zinc-800 rounded-2xl shadow-lg px-1.5 py-1 flex flex-row items-center gap-0.5 z-50 pointer-events-auto outline-none max-w-[calc(100vw-16px)] overflow-x-auto no-scrollbar"
+        // Sits above the status bar and clear of the home indicator. The status
+        // bar is ~44px tall, so 72px keeps a gap on a phone without floating in
+        // the middle of the canvas.
+        style={{ width: 'max-content', bottom: 'calc(72px + env(safe-area-inset-bottom, 0px))' }}
       >
         {/* Drag handle — only this initiates drag */}
         <div
-          className="flex items-center pr-1 text-zinc-400 hover:text-zinc-200 cursor-grab active:cursor-grabbing shrink-0"
+          className="flex items-center pr-0.5 text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-200 cursor-grab active:cursor-grabbing shrink-0"
           onPointerDown={(e) => dragControls.start(e)}
+          title="Drag toolbar"
         >
-          <GripHorizontal size={14} />
+          <GripHorizontal size={12} />
         </div>
 
         {/* All other content stops propagation so clicks don't trigger drag */}
         <div className="flex flex-row items-center gap-0.5" onPointerDown={(e) => e.stopPropagation()}>
-          <div className="h-5 w-px bg-zinc-200 dark:bg-zinc-800 mx-0.5 shrink-0" />
-
           {/* Orientation toggle */}
           <button
             onClick={() => setOrientation('vertical')}
-            className="p-1.5 rounded hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors text-zinc-400 dark:text-zinc-500 shrink-0 relative group"
+            className="p-1 rounded hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors text-zinc-400 dark:text-zinc-500 shrink-0"
             title="Switch to vertical toolbar"
           >
-            <LayoutList size={14} />
-            <div className="absolute bottom-full mb-2 left-1/2 -translate-x-1/2 bg-zinc-900 text-white text-xs px-2 py-1 rounded whitespace-nowrap opacity-0 group-hover:opacity-100 pointer-events-none transition-opacity z-50">
-              Vertical mode
-            </div>
+            <LayoutList size={12} />
           </button>
 
           <div className="h-5 w-px bg-zinc-200 dark:bg-zinc-800 mx-0.5 shrink-0" />

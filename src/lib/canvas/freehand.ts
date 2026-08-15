@@ -1,4 +1,5 @@
 import { getStroke } from 'perfect-freehand';
+import { LaserPointer } from '@excalidraw/laser-pointer';
 import { FreehandElement } from '@/types';
 
 export const renderFreehand = (
@@ -38,6 +39,65 @@ export const renderFreehand = (
   ctx.restore();
 };
 
+/**
+ * Excalidraw's freedraw parameters, taken from its source
+ * (packages/element/src/shape.ts, VARIABLE_WIDTH_FREEDRAW) so a stroke drawn
+ * here looks like a stroke drawn there.
+ */
+export const FREEDRAW = {
+  SIZE_FACTOR: 4.25,
+  /** Constant-width strokes are much narrower for the same nominal width. */
+  CONSTANT_SIZE_FACTOR: 1.4,
+  THINNING: 0.6,
+  SMOOTHING: 0.5,
+  /** Pen and touch. Less input smoothing, so a stylus tracks the tip closely. */
+  STREAMLINE_PRECISE: 0.2,
+  /** Mouse, which is noisier and benefits from more smoothing. */
+  STREAMLINE: 0.5,
+  /** easeOutSine — https://easings.net/#easeOutSine */
+  EASING: (t: number) => Math.sin((t * Math.PI) / 2),
+} as const;
+
+/** Points fed to perfect-freehand: pressure is dropped when it is simulated. */
+const strokeInput = (element: FreehandElement) =>
+  element.simulatePressure
+    ? element.points.map((p) => [p[0], p[1]] as [number, number])
+    : (element.points as [number, number, number][]);
+
+/**
+ * Uniform-width outline, via the same laser-pointer geometry Excalidraw uses
+ * for `variability: 'constant'`. Pressure is pinned to 1 at every point, so
+ * sizeMapping returns the full size throughout and the stroke never tapers.
+ */
+function constantWidthOutline(element: FreehandElement, baseWidth: number): number[][] {
+  const pointer = new LaserPointer({
+    size: baseWidth * FREEDRAW.CONSTANT_SIZE_FACTOR,
+    streamline: element.streamline ?? FREEDRAW.STREAMLINE,
+    simplify: 0,
+    sizeMapping: (details) => Math.max(0.1, details.pressure),
+  });
+  for (const [x, y] of element.points) pointer.addPoint([x, y, 1]);
+  return pointer.getStrokeOutline().map(([x, y]) => [x, y]);
+}
+
+/** The outline for a stroke, honouring its width variability. */
+export function freehandOutline(element: FreehandElement, baseWidth: number): number[][] {
+  if (element.variability === 'constant') {
+    return constantWidthOutline(element, baseWidth);
+  }
+  return getStroke(strokeInput(element) as number[][], {
+    size: baseWidth * FREEDRAW.SIZE_FACTOR,
+    thinning: FREEDRAW.THINNING,
+    smoothing: FREEDRAW.SMOOTHING,
+    streamline: element.streamline ?? FREEDRAW.STREAMLINE,
+    easing: FREEDRAW.EASING,
+    simulatePressure: element.simulatePressure !== false,
+    // No taper overrides: Excalidraw uses perfect-freehand's defaults, and the
+    // end taper this used to force is what put a whisker on every stroke.
+    last: true,
+  });
+}
+
 /* ── Pen: smooth calligraphic stroke, pressure-sensitive width ── */
 function renderPen(
   ctx: CanvasRenderingContext2D,
@@ -46,20 +106,7 @@ function renderPen(
   baseWidth: number,
   opacity: number
 ) {
-  const { points, simulatePressure, taperStart, taperEnd } = element;
-  const outline = getStroke(points as [number, number, number][], {
-    size: baseWidth * 2,
-    thinning: 0.5,
-    // Digitizers sample with a little positional noise; streamline is
-    // perfect-freehand's exponential smoothing on the input points, so nudging
-    // it up removes handwriting wobble without visibly rounding letter corners.
-    smoothing: 0.62,
-    streamline: 0.62,
-    easing: (t) => t,
-    simulatePressure: simulatePressure !== false,
-    start: { taper: taperStart !== undefined ? taperStart : 0, cap: true },
-    end: { taper: taperEnd !== undefined ? taperEnd : baseWidth, cap: true },
-  });
+  const outline = freehandOutline(element, baseWidth);
   if (!outline.length) return;
   ctx.globalAlpha = opacity;
   ctx.fillStyle = color;
@@ -119,13 +166,13 @@ function renderFountain(
   baseWidth: number,
   opacity: number
 ) {
-  const { points, simulatePressure, taperStart, taperEnd } = element;
-  const outline = getStroke(points as [number, number, number][], {
+  const { simulatePressure, taperStart, taperEnd } = element;
+  const outline = getStroke(strokeInput(element) as number[][], {
     size: baseWidth * 4,
     thinning: 0.8,
     smoothing: 0.8,
     streamline: 0.7,
-    easing: (t) => Math.sin((t * Math.PI) / 2),
+    easing: FREEDRAW.EASING,
     simulatePressure: simulatePressure !== false,
     start: { taper: taperStart !== undefined ? taperStart : baseWidth * 3, cap: true },
     end: { taper: taperEnd !== undefined ? taperEnd : baseWidth * 3, cap: true },
@@ -213,21 +260,24 @@ function renderHighlighter(
  * exported stroke matches what is on screen.
  */
 export function freehandOutlinePath(element: FreehandElement): string {
-  const { points, simulatePressure, taperStart, taperEnd, style } = element;
+  const { points, style } = element;
   if (points.length === 0) return '';
   const baseWidth = style.strokeWidth || 2;
-  const fountain = style.penType === 'fountain';
-  const outline = getStroke(points as [number, number, number][], {
-    size: baseWidth * (fountain ? 4 : 2),
-    thinning: fountain ? 0.8 : 0.5,
-    smoothing: fountain ? 0.8 : 0.62,
-    streamline: fountain ? 0.7 : 0.62,
-    easing: fountain ? (t: number) => Math.sin((t * Math.PI) / 2) : (t: number) => t,
-    simulatePressure: simulatePressure !== false,
-    start: { taper: taperStart !== undefined ? taperStart : (fountain ? baseWidth * 3 : 0), cap: true },
-    end: { taper: taperEnd !== undefined ? taperEnd : (fountain ? baseWidth * 3 : baseWidth), cap: true },
-  });
-  return svgPath(outline);
+
+  if (style.penType === 'fountain') {
+    return svgPath(getStroke(strokeInput(element) as number[][], {
+      size: baseWidth * 4,
+      thinning: 0.8,
+      smoothing: 0.8,
+      streamline: 0.7,
+      easing: FREEDRAW.EASING,
+      simulatePressure: element.simulatePressure !== false,
+      start: { taper: baseWidth * 3, cap: true },
+      end: { taper: baseWidth * 3, cap: true },
+    }));
+  }
+
+  return svgPath(freehandOutline(element, baseWidth));
 }
 
 /* ── Shared SVG-path builder for perfect-freehand output ── */

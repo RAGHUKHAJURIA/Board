@@ -18,6 +18,7 @@ export enum ShapeType {
 
 export type Tool =
   | 'select'
+  | 'lasso'
   | 'hand'
   | 'eraser'
   | 'laser'
@@ -32,6 +33,8 @@ export interface StyleProperties {
   roughness: number;
   strokeStyle: 'solid' | 'dashed' | 'dotted';
   penType?: 'pen' | 'pencil' | 'fountain' | 'marker' | 'highlighter';
+  /** Default stroke variability for new freehand strokes. */
+  strokeVariability?: 'variable' | 'constant';
 }
 
 export interface BaseElement {
@@ -65,7 +68,20 @@ export interface FreehandElement extends BaseElement {
   simulatePressure?: boolean;
   taperStart?: number | boolean;
   taperEnd?: number | boolean;
+  /**
+   * perfect-freehand streamline, captured per stroke because it depends on the
+   * input device: Excalidraw uses 0.2 for pen and touch and 0.5 for a mouse,
+   * so a stylus is not smoothed into feeling laggy.
+   */
+  streamline?: number;
+  /**
+   * 'variable' tapers with pressure (the classic Excalidraw look); 'constant'
+   * keeps one width end to end, for handwriting and diagrams.
+   */
+  variability?: StrokeVariability;
 }
+
+export type StrokeVariability = 'variable' | 'constant';
 
 export interface TextElement extends BaseElement {
   type: ShapeType.TEXT;

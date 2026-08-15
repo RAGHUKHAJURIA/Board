@@ -11,6 +11,7 @@ const SECTIONS: { title: string; items: [string, string][] }[] = [
     title: 'Tools',
     items: [
       ['Selection', 'V'],
+      ['Lasso select', 'Q'],
       ['Hand (pan)', 'H'],
       ['Rectangle', 'R'],
       ['Ellipse', 'O'],

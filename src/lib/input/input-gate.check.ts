@@ -14,6 +14,7 @@
 import assert from 'node:assert';
 import { gatePointerEvent } from './input-gate.js';
 import { isPenPointer, deviceHasRealPen } from './pen-detect.js';
+import { ShapeType } from '../../types/canvas.js';
 
 type FakeEvent = Partial<PointerEvent> & { pointerType: string };
 
@@ -50,13 +51,22 @@ function main() {
   assert.equal(deviceHasRealPen(), true);
 
   // Now that a real pen exists on this device, bare touch is palm — block it.
-  // 'block-touch' means "not a stroke", NOT "ignore entirely": the canvas turns
-  // a blocked primary contact into a one-finger scroll, which is what pen mode
-  // does in Excalidraw. Anything reading this decision has to honour that.
   assert.equal(gatePointerEvent(ev({ pointerType: 'touch' }), 'pen', true), 'block-touch');
   // The pen itself keeps drawing, and fingers still work in hand mode.
   assert.equal(gatePointerEvent(ev({ pointerType: 'pen' }), 'pen', true), 'allow');
   assert.equal(gatePointerEvent(ev({ pointerType: 'touch' }), 'hand', true), 'allow');
+
+  // Excalidraw's rule: pen mode stops a finger from DRAWING, not from using the
+  // editor. Selection, hand, text and image still take touch, so you can tap to
+  // select or place text without turning pen mode off and on again.
+  assert.equal(gatePointerEvent(ev({ pointerType: 'touch' }), 'pen', true, 'select'), 'allow');
+  assert.equal(gatePointerEvent(ev({ pointerType: 'touch' }), 'pen', true, 'hand'), 'allow');
+  assert.equal(gatePointerEvent(ev({ pointerType: 'touch' }), 'pen', true, 'text'), 'allow');
+  assert.equal(gatePointerEvent(ev({ pointerType: 'touch' }), 'pen', true, ShapeType.IMAGE), 'allow');
+  // ...but the drawing tools do not.
+  assert.equal(gatePointerEvent(ev({ pointerType: 'touch' }), 'pen', true, ShapeType.FREEHAND), 'block-touch');
+  assert.equal(gatePointerEvent(ev({ pointerType: 'touch' }), 'pen', true, 'eraser'), 'block-touch');
+  assert.equal(gatePointerEvent(ev({ pointerType: 'touch' }), 'pen', true, ShapeType.RECTANGLE), 'block-touch');
 
   console.log('input-gate: all assertions passed');
 }

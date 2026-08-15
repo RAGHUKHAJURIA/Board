@@ -17,9 +17,12 @@ interface UIState {
   currentStyle: StyleProperties;
   /** Which modal is open. Lives here so the menu and the keyboard agree. */
   dialog: "help" | "export" | null;
+  /** 'contain' takes only what the loop encloses; 'intersect' also takes what it cuts. */
+  lassoMode: "contain" | "intersect";
 
   // Actions
   setDialog: (dialog: UIState["dialog"]) => void;
+  setLassoMode: (mode: UIState["lassoMode"]) => void;
   togglePanel: (panel: keyof UIState["panels"]) => void;
   updateGrid: (settings: Partial<GridSettings>) => void;
   updateSnap: (settings: Partial<SnapSettings>) => void;
@@ -63,10 +66,16 @@ export const useUIStore = create<UIState>()(
       },
 
       dialog: null,
+      lassoMode: "contain",
 
       setDialog: (dialog) =>
         set((state) => {
           state.dialog = dialog;
+        }),
+
+      setLassoMode: (mode) =>
+        set((state) => {
+          state.lassoMode = mode;
         }),
 
       togglePanel: (panel) =>

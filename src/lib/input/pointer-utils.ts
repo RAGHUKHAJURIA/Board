@@ -105,12 +105,12 @@ export function extractRawCoalescedPoints(
     const worldX = (screenX - viewport.x) / viewport.zoom;
     const worldY = (screenY - viewport.y) / viewport.zoom;
 
-    // Real pressure from Apple Pencil / S Pen
-    // evt.pressure is 0.0–1.0, but Apple Pencil returns 0 briefly on first contact
-    // Clamp to minimum 0.1 to avoid zero-width stroke start
-    const pressure = evt.pressure > 0
-      ? Math.max(0.1, evt.pressure)
-      : (evt.pointerType === 'pen' ? 0.5 : 0.5);
+    // Real pressure from Apple Pencil / S Pen. evt.pressure is 0.0–1.0, but a
+    // pencil reports 0 for a moment on first contact; 0.5 is also what a device
+    // with no pressure sensor reports, which is the neutral value to fall back
+    // on. Not clamped upwards any more: raising a genuine light touch to 0.1
+    // flattened the start of every stroke.
+    const pressure = evt.pressure > 0 ? evt.pressure : 0.5;
 
     return [worldX, worldY, pressure] as [number, number, number];
   });

@@ -8,6 +8,7 @@ import { renderFreehand } from '@/lib/canvas/freehand';
 import { Point, ShapeType, WhiteboardElement, FreehandElement, ShapeElement, TextElement, ConnectorElement, ImageElement, BoundingBox } from '@/types';
 import { isPointInBox, getElementBBox } from '@/lib/utils/geometry';
 import { computeSnap, drawGuides, type SmartGuide } from '@/lib/canvas/smart-guides';
+import { getLassoSelectedIds, drawLassoPath } from '@/lib/canvas/lasso';
 import { SelectionBox } from './SelectionBox';
 import { IconPicker } from './IconPicker';
 import { ContextMenu, type ContextMenuState } from './ContextMenu';
@@ -28,6 +29,7 @@ import { isPenPointer } from '@/lib/input/pen-detect';
 import { getDeviceCapabilities } from '@/lib/input/device-detection';
 import { createActiveStroke, clearStrokeTimeout, type ActiveStroke, type CompletionReason } from '@/lib/canvas/stroke-state';
 import { LaserTrail } from '@/lib/canvas/laser';
+import { FREEDRAW } from '@/lib/canvas/freehand';
 import { layoutText, FONT_FAMILIES } from '@/lib/canvas/text';
 import { PenCursor } from './PenCursor';
 
@@ -46,7 +48,8 @@ type InteractionMode =
   | 'erasing'
   | 'connector-draw'
   | 'connector-reshaping'
-  | 'connector-endpoint-drag';
+  | 'connector-endpoint-drag'
+  | 'lasso';
 
 
 export function Canvas() {
@@ -161,15 +164,19 @@ export function Canvas() {
   const laserRef = useRef(new LaserTrail());
   const laserPointerRef = useRef<number | null>(null);
 
+  // Lasso: a freehand selection loop, drawn on the overlay and never committed.
+  const lassoPathRef = useRef<Point[]>([]);
+  const lassoPointerRef = useRef<number | null>(null);
+  const lassoDirtyRef = useRef(false);
+
   // Space held = temporary hand tool, as in Excalidraw. A ref because the
   // native drawing listeners need to see it without re-registering.
   const spaceDownRef = useRef(false);
 
   // Two-finger pinch/pan is in progress — the drawing listeners must stand down.
   const gestureActiveRef = useRef(false);
-  // Single finger acting as a scroll gesture rather than a stroke: Excalidraw's
-  // pen mode, where only the stylus draws and a finger moves the canvas.
-  const fingerPanRef = useRef<{ pointerId: number; x: number; y: number } | null>(null);
+  // Pen mode auto-enables once, on the first stylus contact.
+  const penAutoDetectedRef = useRef(false);
 
   // Initialize EraserManager
   useEffect(() => {
@@ -323,7 +330,13 @@ export function Canvas() {
     // swallowed by the pen-mode gate or by the early returns that hand drawing
     // tools off to the native listeners.
     const applyPinch = (scale: number, cx: number, cy: number) => {
-      const vp = useCanvasStore.getState().viewport;
+      const store = useCanvasStore.getState();
+      // Excalidraw pins the scale factor to 1 while the freedraw tool is active
+      // in pen mode: two fingers resting on the screen next to the stylus
+      // should move the page, not resize the drawing under it.
+      if (store.tool === ShapeType.FREEHAND && store.inputMode.mode === 'pen') return;
+
+      const vp = store.viewport;
       // Same clamp as the wheel path; pinch used to stop at 5× while the wheel
       // went to 10×, so a tablet simply could not zoom as far as a laptop.
       const zoom = Math.max(0.05, Math.min(vp.zoom * scale, 10));
@@ -339,6 +352,18 @@ export function Canvas() {
       const vp = useCanvasStore.getState().viewport;
       useCanvasStore.getState().updateViewport({ x: vp.x + dx, y: vp.y + dy });
     };
+
+    // Fires once, the first time a real stylus touches the screen: pen mode
+    // turns itself on, exactly as Excalidraw does (App.tsx — "fires only once,
+    // if pen is detected, penMode is enabled"). The user can still toggle it
+    // back off, and that choice sticks because it is what gets persisted.
+    function handleFirstPenContact(e: PointerEvent) {
+      if (penAutoDetectedRef.current) return;
+      if (!isPenPointer(e)) return;
+      penAutoDetectedRef.current = true;
+      const store = useCanvasStore.getState();
+      if (store.inputMode.mode !== 'pen') store.setInputMode('pen');
+    }
 
     function handleNativeTouchDown(e: PointerEvent) {
       if (e.pointerType !== 'touch') return;
@@ -357,19 +382,18 @@ export function Canvas() {
         abortActiveStroke();
         cancelErase();
         laserRef.current.clear();
-        fingerPanRef.current = null;
         gestureActiveRef.current = true;
         setMode('panning');
         return;
       }
 
-      // Single finger. If the gate won't let it draw — pen mode with a real
-      // stylus around — it scrolls the canvas instead of doing nothing at all,
-      // which is exactly how Excalidraw's pen mode behaves.
+      // A single finger the gate won't let draw is simply ignored — in pen mode
+      // Excalidraw drops the event and leaves the canvas still; panning is the
+      // two-finger gesture. (An earlier version of this made one finger pan,
+      // which is Procreate's behaviour, not Excalidraw's.)
       const im = store.inputMode;
-      if (gatePointerEvent(e, im.mode, im.isTouchDevice) !== 'allow') {
+      if (gatePointerEvent(e, im.mode, im.isTouchDevice, store.tool) !== 'allow') {
         e.preventDefault();
-        fingerPanRef.current = { pointerId: e.pointerId, x: e.clientX, y: e.clientY };
       }
     }
 
@@ -378,15 +402,6 @@ export function Canvas() {
 
       if (gestureHandler.onPointerMove(e, applyPinch, applyPan)) {
         e.preventDefault();
-        return;
-      }
-
-      const pan = fingerPanRef.current;
-      if (pan && pan.pointerId === e.pointerId) {
-        e.preventDefault();
-        applyPan(e.clientX - pan.x, e.clientY - pan.y);
-        pan.x = e.clientX;
-        pan.y = e.clientY;
       }
     }
 
@@ -395,7 +410,6 @@ export function Canvas() {
 
       gestureHandler.onPointerUp(e);
       rejectedPointers.current.delete(e.pointerId);
-      if (fingerPanRef.current?.pointerId === e.pointerId) fingerPanRef.current = null;
 
       if (!gestureHandler.isGestureActive()) {
         gestureActiveRef.current = false;
@@ -410,7 +424,7 @@ export function Canvas() {
       // Space held is a temporary hand tool — pan, don't draw.
       if (spaceDownRef.current) return;
       // A finger that is scrolling or pinching is not drawing.
-      if (gestureActiveRef.current || fingerPanRef.current) return;
+      if (gestureActiveRef.current) return;
 
       const store = useCanvasStore.getState();
       const currentTool = store.tool;
@@ -494,7 +508,7 @@ export function Canvas() {
       // Only intercept pen/touch events that would draw freehand
       // Let the React handler manage everything else
       const im = store.inputMode;
-      const decision = gatePointerEvent(e, im.mode, im.isTouchDevice);
+      const decision = gatePointerEvent(e, im.mode, im.isTouchDevice, store.tool);
       if (decision !== 'allow') return;
 
       // Don't intercept right-click or if already in a non-idle/non-freehand mode
@@ -519,7 +533,19 @@ export function Canvas() {
       const screenY = e.clientY - rect.top;
       const worldX = (screenX - vp.x) / vp.zoom;
       const worldY = (screenY - vp.y) / vp.zoom;
-      const pressure = e.pressure > 0 ? Math.max(0.1, e.pressure) : 0.5;
+      // Excalidraw's test, and it is a better one than "is this a pen?":
+      // a device with no pressure sensor reports exactly 0.5, so that value —
+      // and only that value — means "synthesise pressure from speed". A stylus
+      // that reports a flat 0.5 gets simulated pressure instead of a dead
+      // constant-width line, and an Android finger reporting real analog
+      // pressure gets to use it.
+      const simulatePressure = e.pressure === 0.5;
+      const pressure = e.pressure > 0 ? e.pressure : 0.5;
+      // Pen and touch track the tip closely; a mouse is noisier and wants more
+      // input smoothing.
+      const streamline = e.pointerType !== 'mouse'
+        ? FREEDRAW.STREAMLINE_PRECISE
+        : FREEDRAW.STREAMLINE;
 
       // Build the element but keep it OUT of the store until the pen lifts.
       // store.addElement() clones the whole board for the undo snapshot, and
@@ -538,9 +564,9 @@ export function Canvas() {
         zIndex: Date.now(),
         style: { ...useUIStore.getState().currentStyle },
         points: [[worldX, worldY, pressure]],
-        // No real pressure channel (finger or capacitive stylus) → synthesise
-        // it from speed so those inputs still get a tapered, natural stroke.
-        simulatePressure: !isPen,
+        simulatePressure,
+        streamline,
+        variability: useUIStore.getState().currentStyle.strokeVariability ?? 'variable',
       };
       liveStrokeElRef.current = newEl;
       currentElementRef.current = newEl;
@@ -568,7 +594,7 @@ export function Canvas() {
 
       const store = useCanvasStore.getState();
       const im = store.inputMode;
-      const decision = gatePointerEvent(e, im.mode, im.isTouchDevice);
+      const decision = gatePointerEvent(e, im.mode, im.isTouchDevice, store.tool);
       if (decision !== 'allow') return;
 
       // Prevent browser gestures/scrolling from cancelling active drawing
@@ -660,14 +686,14 @@ export function Canvas() {
 
     function handleNativeEraserDown(e: PointerEvent) {
       if (spaceDownRef.current) return;
-      if (gestureActiveRef.current || fingerPanRef.current) return;
+      if (gestureActiveRef.current) return;
       const store = useCanvasStore.getState();
       if (store.tool !== 'eraser' || e.button === 2) return;
       // A second contact is a pinch or a pan, never a wipe.
       if (!e.isPrimary) return;
 
       const im = store.inputMode;
-      if (gatePointerEvent(e, im.mode, im.isTouchDevice) !== 'allow') return;
+      if (gatePointerEvent(e, im.mode, im.isTouchDevice, store.tool) !== 'allow') return;
 
       e.preventDefault();
       try { canvas.setPointerCapture(e.pointerId); } catch {}
@@ -692,7 +718,7 @@ export function Canvas() {
       if (erasePointerRef.current !== e.pointerId) return;
       const store = useCanvasStore.getState();
       const im = store.inputMode;
-      if (gatePointerEvent(e, im.mode, im.isTouchDevice) !== 'allow') return;
+      if (gatePointerEvent(e, im.mode, im.isTouchDevice, store.tool) !== 'allow') return;
 
       e.preventDefault();
       const mgr = eraserRef.current;
@@ -714,7 +740,7 @@ export function Canvas() {
     // ── Laser pointer ─────────────────────────────────────────────────────
     function handleNativeLaserDown(e: PointerEvent) {
       if (spaceDownRef.current) return;
-      if (gestureActiveRef.current || fingerPanRef.current) return;
+      if (gestureActiveRef.current) return;
       const store = useCanvasStore.getState();
       if (store.tool !== 'laser' || e.button === 2) return;
       if (!e.isPrimary) return;
@@ -723,7 +749,7 @@ export function Canvas() {
       // pinching finger painted a trail while every other tool correctly
       // ignored it.
       const im = store.inputMode;
-      if (gatePointerEvent(e, im.mode, im.isTouchDevice) !== 'allow') return;
+      if (gatePointerEvent(e, im.mode, im.isTouchDevice, store.tool) !== 'allow') return;
 
       e.preventDefault();
       try { canvas.setPointerCapture(e.pointerId); } catch {}
@@ -749,7 +775,73 @@ export function Canvas() {
       // The tail is left to fade on its own rather than snapping away.
     }
 
-    // Gestures first: they decide whether the contact is a stroke at all.
+    // ── Lasso selection ───────────────────────────────────────────────────
+    function handleNativeLassoDown(e: PointerEvent) {
+      if (spaceDownRef.current || gestureActiveRef.current) return;
+      const store = useCanvasStore.getState();
+      if (store.tool !== 'lasso' || e.button === 2) return;
+      if (!e.isPrimary) return;
+
+      const im = store.inputMode;
+      if (gatePointerEvent(e, im.mode, im.isTouchDevice, store.tool) !== 'allow') return;
+
+      e.preventDefault();
+      try { canvas.setPointerCapture(e.pointerId); } catch {}
+
+      lassoPointerRef.current = e.pointerId;
+      lassoPathRef.current = [worldFromEvent(e)];
+      lassoDirtyRef.current = true;
+      if (!e.shiftKey) store.clearSelection();
+      setMode('lasso');
+      setIsInteracting(true);
+    }
+
+    function handleNativeLassoMove(e: PointerEvent) {
+      if (lassoPointerRef.current !== e.pointerId) return;
+      if (gestureActiveRef.current) return;
+      e.preventDefault();
+
+      const store = useCanvasStore.getState();
+      for (const [x, y] of extractRawCoalescedPoints(e, canvas, store.viewport)) {
+        lassoPathRef.current.push({ x, y });
+      }
+      lassoDirtyRef.current = true;
+
+      // Live selection, as Excalidraw does — you can see what the loop has
+      // caught before committing to it.
+      const ids = getLassoSelectedIds(
+        lassoPathRef.current,
+        store.elements,
+        store.viewport.zoom,
+        useUIStore.getState().lassoMode
+      );
+      store.selectElements(ids);
+    }
+
+    function handleNativeLassoUp(e: PointerEvent) {
+      if (lassoPointerRef.current !== e.pointerId) return;
+      lassoPointerRef.current = null;
+      lassoPathRef.current = [];
+      lassoDirtyRef.current = false;
+      clearOverlay();
+
+      // Hand the selection over to the select tool. Keeping the lasso active
+      // would mean the very next drag started another loop instead of moving
+      // what you just caught, so the selection was unusable without a trip to
+      // the toolbar. (Excalidraw keeps its lasso active and routes the drag
+      // internally; this is the same outcome with far less machinery.)
+      const store = useCanvasStore.getState();
+      if (store.selectedIds.size > 0) store.setTool('select');
+
+      if (modeRef.current === 'lasso') {
+        setMode('idle');
+        setIsInteracting(false);
+      }
+    }
+
+    // Pen detection first, so pen mode is already on for this very contact.
+    canvas.addEventListener('pointerdown', handleFirstPenContact, { passive: true });
+    // Gestures next: they decide whether the contact is a stroke at all.
     canvas.addEventListener('pointerdown', handleNativeTouchDown, { passive: false });
     canvas.addEventListener('pointermove', handleNativeTouchMove, { passive: false });
     canvas.addEventListener('pointerup', handleNativeTouchUp, { passive: true });
@@ -767,6 +859,12 @@ export function Canvas() {
     canvas.addEventListener('pointerup', handleNativeLaserUp, { passive: true });
     canvas.addEventListener('pointercancel', handleNativeLaserUp, { passive: true });
 
+    canvas.addEventListener('pointerdown', handleNativeLassoDown, { passive: false });
+    canvas.addEventListener('pointermove', handleNativeLassoMove, { passive: false });
+    canvas.addEventListener('pointerup', handleNativeLassoUp, { passive: true });
+    canvas.addEventListener('pointercancel', handleNativeLassoUp, { passive: true });
+    canvas.addEventListener('lostpointercapture', handleNativeLassoUp, { passive: true });
+
     canvas.addEventListener('pointerdown', handleNativeEraserDown, { passive: false });
     canvas.addEventListener('pointermove', handleNativeEraserMove, { passive: false });
     canvas.addEventListener('pointerup', handleNativeEraserUp, { passive: false });
@@ -776,6 +874,7 @@ export function Canvas() {
     canvas.addEventListener('lostpointercapture', handleNativeEraserUp, { passive: true });
 
     return () => {
+      canvas.removeEventListener('pointerdown', handleFirstPenContact);
       canvas.removeEventListener('pointerdown', handleNativeTouchDown);
       canvas.removeEventListener('pointermove', handleNativeTouchMove);
       canvas.removeEventListener('pointerup', handleNativeTouchUp);
@@ -794,8 +893,13 @@ export function Canvas() {
       canvas.removeEventListener('pointermove', handleNativeLaserMove);
       canvas.removeEventListener('pointerup', handleNativeLaserUp);
       canvas.removeEventListener('pointercancel', handleNativeLaserUp);
+      canvas.removeEventListener('pointerdown', handleNativeLassoDown);
+      canvas.removeEventListener('pointermove', handleNativeLassoMove);
+      canvas.removeEventListener('pointerup', handleNativeLassoUp);
+      canvas.removeEventListener('pointercancel', handleNativeLassoUp);
+      canvas.removeEventListener('lostpointercapture', handleNativeLassoUp);
     };
-  }, [finalizeActiveStroke, abortActiveStroke, setIsInteracting, setMode, syncErasePreview, commitErase, cancelErase]);
+  }, [finalizeActiveStroke, abortActiveStroke, setIsInteracting, setMode, syncErasePreview, commitErase, cancelErase, clearOverlay]);
 
   // ── Live-stroke overlay loop ────────────────────────────────────────────
   // Redraws only the stroke currently under the pen, and only when new points
@@ -831,6 +935,18 @@ export function Canvas() {
         // expires is also the frame that wipes the trail off the screen.
         const ctx = prepareOverlay();
         if (ctx && stillAlive) laser.draw(ctx, useCanvasStore.getState().viewport.zoom);
+        return;
+      }
+
+      // Lasso loop in progress.
+      if (lassoDirtyRef.current) {
+        lassoDirtyRef.current = false;
+        // prepareOverlay clears first, so an emptied path wipes the loop rather
+        // than leaving the last frame of it painted on the overlay.
+        const ctx = prepareOverlay();
+        if (ctx && lassoPathRef.current.length > 1) {
+          drawLassoPath(ctx, lassoPathRef.current, useCanvasStore.getState().viewport.zoom);
+        }
         return;
       }
 
@@ -899,6 +1015,18 @@ export function Canvas() {
       document.removeEventListener('visibilitychange', handleVisibilityChange);
     };
   }, [finalizeActiveStroke]);
+
+  // Abandon any half-drawn lasso when the tool changes. Without this, a loop
+  // interrupted by a toolbar click (rather than a pointerup on the canvas)
+  // stayed painted on the overlay over everything drawn afterwards.
+  useEffect(() => {
+    if (tool === 'lasso') return;
+    if (lassoPathRef.current.length === 0 && lassoPointerRef.current === null) return;
+    lassoPointerRef.current = null;
+    lassoPathRef.current = [];
+    lassoDirtyRef.current = false;
+    clearOverlay();
+  }, [tool, clearOverlay]);
 
   // ── Space to pan ────────────────────────────────────────────────────────
   // Held space is a temporary hand tool. Tracked separately from the shortcut
@@ -1220,7 +1348,7 @@ export function Canvas() {
     // Touch gestures and finger-panning are handled by the native listeners
     // above, which run first and have already claimed this contact.
     if (nativeEvent.pointerType === 'touch') {
-      if (gestureActiveRef.current || fingerPanRef.current) {
+      if (gestureActiveRef.current) {
         // Cancel a shape drag that a second finger interrupted.
         if (modeRef.current === 'drawing') {
           const lastEl = elements[currentElementRef.current?.id || ''];
@@ -1231,7 +1359,7 @@ export function Canvas() {
       if (rejectedPointers.current.has(e.pointerId)) return;
     }
 
-    const decision = gatePointerEvent(nativeEvent, inputMode.mode, inputMode.isTouchDevice);
+    const decision = gatePointerEvent(nativeEvent, inputMode.mode, inputMode.isTouchDevice, tool);
     if (decision === 'block-touch' || decision === 'block-pen') return;
 
     // Space held, middle button, or the hand tool: pan, whatever tool is active.
@@ -1245,7 +1373,7 @@ export function Canvas() {
 
     // Freehand, eraser and laser run on the native listeners above (they need
     // the coalesced sub-frame samples React's synthetic events throw away).
-    if (tool === ShapeType.FREEHAND || tool === 'eraser' || tool === 'laser') {
+    if (tool === ShapeType.FREEHAND || tool === 'eraser' || tool === 'laser' || tool === 'lasso') {
       return;
     }
 
@@ -1482,14 +1610,14 @@ export function Canvas() {
     if (rejectedPointers.current.has(e.pointerId)) return;
 
     // Pinch/pan and finger scrolling are applied by the native listeners.
-    if (gestureActiveRef.current || fingerPanRef.current) return;
+    if (gestureActiveRef.current) return;
 
     // Freehand and eraser moves belong to the native listeners.
-    if ((tool === ShapeType.FREEHAND || tool === 'eraser' || tool === 'laser') && modeRef.current !== 'panning') {
+    if ((tool === ShapeType.FREEHAND || tool === 'eraser' || tool === 'laser' || tool === 'lasso') && modeRef.current !== 'panning') {
       return;
     }
 
-    const decision = gatePointerEvent(nativeEvent, inputMode.mode, inputMode.isTouchDevice);
+    const decision = gatePointerEvent(nativeEvent, inputMode.mode, inputMode.isTouchDevice, tool);
     if (decision === 'block-touch' || decision === 'block-pen') return;
 
     const screen: Point = { x: e.clientX, y: e.clientY };
@@ -1825,15 +1953,15 @@ export function Canvas() {
     if (e.nativeEvent.pointerType !== 'touch') {
       rejectedPointers.current.delete(e.pointerId);
       gestureHandler.onPointerUp(e.nativeEvent);
-    } else if (gestureActiveRef.current || fingerPanRef.current) {
+    } else if (gestureActiveRef.current) {
       return;
     }
 
-    if ((tool === ShapeType.FREEHAND || tool === 'eraser' || tool === 'laser') && modeRef.current !== 'panning') {
+    if ((tool === ShapeType.FREEHAND || tool === 'eraser' || tool === 'laser' || tool === 'lasso') && modeRef.current !== 'panning') {
       return;
     }
 
-    const decision = gatePointerEvent(e.nativeEvent, inputMode.mode, inputMode.isTouchDevice);
+    const decision = gatePointerEvent(e.nativeEvent, inputMode.mode, inputMode.isTouchDevice, tool);
     if (decision === 'block-touch' || decision === 'block-pen') return;
 
     const prevMode = modeRef.current;
@@ -2236,7 +2364,13 @@ export function Canvas() {
     isMultiple: boolean;
   } | null;
 
-  if (selectedIds.size > 0 && tool === 'select' && modeRef.current !== 'text-editing') {
+  // The lasso is a selection tool, so it must show the selection it made.
+  // Gating this on 'select' alone meant a lasso selected the elements — the
+  // status bar even said so — while nothing appeared on the canvas and there
+  // were no handles to drag, which reads as the tool doing nothing at all.
+  const showsSelection = tool === 'select' || tool === 'lasso';
+
+  if (selectedIds.size > 0 && showsSelection && modeRef.current !== 'text-editing') {
     const selectedArray = Array.from(selectedIds).map(id => elements[id]).filter(Boolean) as WhiteboardElement[];
     if (selectedArray.length === 1) {
       const el = selectedArray[0]!;
@@ -2262,7 +2396,7 @@ export function Canvas() {
   // Cursor
   const getCursor = () => {
     if (tool === 'hand' || mode === 'panning') return 'grabbing';
-    if (tool === 'laser') return 'crosshair';
+    if (tool === 'laser' || tool === 'lasso') return 'crosshair';
     if (tool === 'eraser') return 'none'; // we draw a custom cursor
     if (tool === 'text') return 'text';
     if (mode === 'dragging') return 'move';

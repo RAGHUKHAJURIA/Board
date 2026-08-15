@@ -113,6 +113,9 @@ export function useKeyboardShortcuts() {
           case 'k':
             e.preventDefault(); setTool('laser');
             break;
+          case 'q':
+            e.preventDefault(); setTool('lasso');
+            break;
           case 'escape':
             e.preventDefault();
             clearSelection();
