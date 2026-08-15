@@ -2,7 +2,7 @@ import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import { immer } from 'zustand/middleware/immer';
 import { enableMapSet } from 'immer';
-import { WhiteboardElement, ConnectorElement, Viewport, Tool, ShapeType, IconElement, FreehandElement } from '@/types';
+import { WhiteboardElement, ConnectorElement, Viewport, Tool, ShapeType, IconElement, FreehandElement, ImageElement, TextElement, StyleProperties, Point } from '@/types';
 import type { CanvasInputMode, InputModeState } from '@/types/input';
 import { getElementBBox } from '@/lib/utils/geometry';
 import { ConnectorManager } from '@/lib/canvas/connectors';
@@ -72,7 +72,8 @@ interface CanvasState {
 
   // Clipboard
   copy: () => void;
-  paste: () => void;
+  /** `at` (world coords) centres the pasted copy there, as Excalidraw does. */
+  paste: (at?: Point) => void;
   duplicate: () => void;
 
   // Z-index management
@@ -84,9 +85,29 @@ interface CanvasState {
   // Alignment
   alignElements: (alignment: 'left' | 'center-h' | 'right' | 'top' | 'center-v' | 'bottom') => void;
 
+  // Grouping
+  groupSelected: () => void;
+  ungroupSelected: () => void;
+
+  // Locking
+  setLocked: (ids: string[], locked: boolean) => void;
+  toggleLockSelected: () => void;
+
+  // Flipping
+  flipSelected: (axis: 'horizontal' | 'vertical') => void;
+
+  // Style clipboard (Ctrl+Alt+C / Ctrl+Alt+V)
+  styleClipboard: StyleProperties | null;
+  copyStyle: () => void;
+  pasteStyle: () => void;
+
   // Zoom helpers
   zoomToFit: () => void;
   setZoom: (zoom: number) => void;
+  scrollToContent: () => void;
+
+  /** Replace the whole scene (opening a file). Undoable. */
+  loadScene: (elements: WhiteboardElement[], background?: string) => void;
 
   // Eraser Settings
   eraserSettings: {
@@ -149,6 +170,47 @@ const cloneElements = (elements: Record<string, WhiteboardElement>): Record<stri
     }
   }
   return clone;
+};
+
+/**
+ * Widen a selection so that picking any member of a group brings in every
+ * element sharing its outermost group id.
+ */
+const expandToGroups = (
+  ids: string[],
+  elements: Record<string, WhiteboardElement>
+): string[] => {
+  const groups = new Set<string>();
+  for (const id of ids) {
+    const outermost = elements[id]?.groupIds?.[0];
+    if (outermost) groups.add(outermost);
+  }
+  if (groups.size === 0) return ids;
+
+  const out = new Set(ids);
+  for (const id in elements) {
+    const outermost = elements[id]!.groupIds?.[0];
+    if (outermost && groups.has(outermost)) out.add(id);
+  }
+  return Array.from(out);
+};
+
+/**
+ * Push the current elements onto the undo stack, dropping any redo future.
+ * This block was copy-pasted into six actions; a seventh copy is how the two
+ * that quietly disagreed about the 100-entry cap came about.
+ */
+const pushHistory = (state: {
+  history: HistorySnapshot[];
+  historyIndex: number;
+  elements: Record<string, WhiteboardElement>;
+  canvasBackground: string;
+}) => {
+  const newHistory = state.history.slice(0, state.historyIndex + 1);
+  newHistory.push({ elements: cloneElements(state.elements), canvasBackground: state.canvasBackground });
+  if (newHistory.length > 100) newHistory.shift();
+  state.history = newHistory;
+  state.historyIndex = newHistory.length - 1;
 };
 
 export const useCanvasStore = create<CanvasState>()(
@@ -284,7 +346,6 @@ export const useCanvasStore = create<CanvasState>()(
 
       element.bbox = getElementBBox(element);
 
-      // Save snapshot before change
       get().saveSnapshot();
 
       set((state) => {
@@ -306,13 +367,7 @@ export const useCanvasStore = create<CanvasState>()(
     }),
 
     setCanvasBackground: (color) => set((state) => {
-      // Save snapshot before changing background
-      const newHistory = state.history.slice(0, state.historyIndex + 1);
-      newHistory.push({ elements: cloneElements(state.elements), canvasBackground: state.canvasBackground });
-      if (newHistory.length > 100) newHistory.shift();
-      state.history = newHistory;
-      state.historyIndex = newHistory.length - 1;
-
+      pushHistory(state);
       state.canvasBackground = color;
     }),
 
@@ -351,12 +406,7 @@ export const useCanvasStore = create<CanvasState>()(
 
       if (changed) {
         // Save snapshot so Ctrl+Z can undo the inversion
-        const newHistory = state.history.slice(0, state.historyIndex + 1);
-        newHistory.push({ elements: cloneElements(state.elements), canvasBackground: state.canvasBackground });
-        if (newHistory.length > 100) newHistory.shift();
-        state.history = newHistory;
-        state.historyIndex = newHistory.length - 1;
-
+        pushHistory(state);
         state.elements = newElements;
       }
     }),
@@ -371,23 +421,12 @@ export const useCanvasStore = create<CanvasState>()(
 
 
     saveSnapshot: () => set((state) => {
-      // Truncate future if we're not at the end
-      const newHistory = state.history.slice(0, state.historyIndex + 1);
-      newHistory.push({ elements: cloneElements(state.elements), canvasBackground: state.canvasBackground });
-      // Cap at 100 entries
-      if (newHistory.length > 100) newHistory.shift();
-      state.history = newHistory;
-      state.historyIndex = newHistory.length - 1;
+      pushHistory(state);
     }),
 
     addElement: (element) => set((state) => {
-      // Save snapshot before change
-      const newHistory = state.history.slice(0, state.historyIndex + 1);
-      newHistory.push({ elements: cloneElements(state.elements), canvasBackground: state.canvasBackground });
-      if (newHistory.length > 100) newHistory.shift();
-      state.history = newHistory;
-      state.historyIndex = newHistory.length - 1;
-      
+      pushHistory(state);
+
       const bbox = getElementBBox(element);
       const elWithBBox = { ...element, bbox } as typeof state.elements[string];
 
@@ -498,12 +537,17 @@ export const useCanvasStore = create<CanvasState>()(
     }),
 
     deleteElements: (ids) => set((state) => {
-      // Save snapshot before deletion
-      const newHistory = state.history.slice(0, state.historyIndex + 1);
-      newHistory.push({ elements: cloneElements(state.elements), canvasBackground: state.canvasBackground });
-      if (newHistory.length > 100) newHistory.shift();
-      state.history = newHistory;
-      state.historyIndex = newHistory.length - 1;
+      pushHistory(state);
+
+      // A label has no life of its own — deleting the shape deletes its text.
+      const doomed = new Set(ids);
+      Object.values(state.elements).forEach((el) => {
+        if (el.type === ShapeType.TEXT) {
+          const containerId = (el as TextElement).containerId;
+          if (containerId && doomed.has(containerId)) doomed.add(el.id);
+        }
+      });
+      ids = Array.from(doomed);
 
       ids.forEach(id => {
         // Also call detachConnectorsFromElement
@@ -636,7 +680,9 @@ export const useCanvasStore = create<CanvasState>()(
     }),
 
     selectElements: (ids) => set((state) => {
-      state.selectedIds = new Set(ids);
+      // Selecting any member of a group selects the whole group, so dragging
+      // one piece moves them all — the point of grouping.
+      state.selectedIds = new Set(expandToGroups(ids, state.elements));
     }),
 
     clearSelection: () => set((state) => {
@@ -685,28 +731,57 @@ export const useCanvasStore = create<CanvasState>()(
       state.clipboard = JSON.parse(JSON.stringify(toCopy));
     }),
 
-    paste: () => set((state) => {
+    paste: (at) => set((state) => {
       if (state.clipboard.length === 0) return;
       const newIds: string[] = [];
-      
-      // Save snapshot
-      const newHistory = state.history.slice(0, state.historyIndex + 1);
-      newHistory.push({ elements: cloneElements(state.elements), canvasBackground: state.canvasBackground });
-      state.history = newHistory;
-      state.historyIndex = newHistory.length - 1;
+
+      pushHistory(state);
+
+      // Default nudge, or centre the whole clipboard on `at` when given.
+      let dx = 20;
+      let dy = 20;
+      if (at) {
+        const boxes = state.clipboard.map((el) => getElementBBox(el));
+        const minX = Math.min(...boxes.map((b) => b.minX));
+        const minY = Math.min(...boxes.map((b) => b.minY));
+        const maxX = Math.max(...boxes.map((b) => b.maxX));
+        const maxY = Math.max(...boxes.map((b) => b.maxY));
+        dx = at.x - (minX + maxX) / 2;
+        dy = at.y - (minY + maxY) / 2;
+      }
+
+      // A pasted group stays a group, but under fresh ids — otherwise the copy
+      // and the original would be welded into one selection.
+      const groupRemap = new Map<string, string>();
 
       state.clipboard.forEach(el => {
         const newId = `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
         const newEl = {
           ...JSON.parse(JSON.stringify(el)),
           id: newId,
-          x: el.x + 20,
-          y: el.y + 20,
+          x: el.x + dx,
+          y: el.y + dy,
           zIndex: Date.now() + Math.random(),
         } as typeof state.elements[string];
         if (newEl.type === ShapeType.FREEHAND) {
           const fh = newEl as FreehandElement;
-          fh.points = fh.points.map(pt => [pt[0] + 20, pt[1] + 20, pt[2]]);
+          fh.points = fh.points.map(pt => [pt[0] + dx, pt[1] + dy, pt[2]]);
+        }
+        if (newEl.type === ShapeType.CONNECTOR) {
+          const conn = newEl as ConnectorElement;
+          conn.startX += dx; conn.endX += dx;
+          conn.startY += dy; conn.endY += dy;
+          conn.controlPoints = conn.controlPoints?.map((cp) => ({ x: cp.x + dx, y: cp.y + dy }));
+        }
+        if (newEl.groupIds) {
+          newEl.groupIds = newEl.groupIds.map((g: string) => {
+            let mapped = groupRemap.get(g);
+            if (!mapped) {
+              mapped = `grp-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+              groupRemap.set(g, mapped);
+            }
+            return mapped;
+          });
         }
         newEl.bbox = getElementBBox(newEl);
         state.elements[newId] = newEl;
@@ -799,6 +874,155 @@ export const useCanvasStore = create<CanvasState>()(
       });
     }),
 
+    // ── Grouping ───────────────────────────────────────────────────────────
+    groupSelected: () => set((state) => {
+      const ids = Array.from(state.selectedIds);
+      if (ids.length < 2) return;
+      pushHistory(state);
+
+      const groupId = `grp-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+      ids.forEach((id) => {
+        const el = state.elements[id];
+        if (!el) return;
+        // Appended, not replaced: an element already in a group keeps its inner
+        // membership and gains this one as the new outermost.
+        el.groupIds = [groupId, ...(el.groupIds ?? [])];
+      });
+    }),
+
+    ungroupSelected: () => set((state) => {
+      const ids = Array.from(state.selectedIds);
+      if (ids.length === 0) return;
+
+      // Only drop a group the whole selection actually shares, so ungrouping
+      // one member can't quietly tear the rest of the group apart.
+      const first = state.elements[ids[0]!];
+      const outermost = first?.groupIds?.[0];
+      if (!outermost) return;
+      if (!ids.every((id) => state.elements[id]?.groupIds?.[0] === outermost)) return;
+
+      pushHistory(state);
+      Object.values(state.elements).forEach((el) => {
+        if (el.groupIds?.[0] === outermost) {
+          el.groupIds = el.groupIds.slice(1);
+          if (el.groupIds.length === 0) delete el.groupIds;
+        }
+      });
+    }),
+
+    // ── Locking ────────────────────────────────────────────────────────────
+    setLocked: (ids, locked) => set((state) => {
+      if (ids.length === 0) return;
+      pushHistory(state);
+      ids.forEach((id) => {
+        const el = state.elements[id];
+        if (el) el.locked = locked;
+      });
+      // A locked element can't be hit-tested, so leaving it selected would
+      // strand a selection box you can't dismiss by clicking the element.
+      if (locked) state.selectedIds.clear();
+    }),
+
+    toggleLockSelected: () => {
+      const state = get();
+      const ids = Array.from(state.selectedIds);
+      if (ids.length === 0) return;
+      const allLocked = ids.every((id) => state.elements[id]?.locked);
+      state.setLocked(ids, !allLocked);
+    },
+
+    // ── Flip ───────────────────────────────────────────────────────────────
+    flipSelected: (axis) => set((state) => {
+      const ids = Array.from(state.selectedIds);
+      const els = ids.map((id) => state.elements[id]).filter(Boolean) as WhiteboardElement[];
+      if (els.length === 0) return;
+      pushHistory(state);
+
+      // Mirror about the selection's own bounds, so a multi-element flip
+      // rearranges the group rather than flipping each piece in place.
+      const bounds = els.map((e) => getElementBBox(e));
+      const min = axis === 'horizontal'
+        ? Math.min(...bounds.map((b) => b.minX))
+        : Math.min(...bounds.map((b) => b.minY));
+      const max = axis === 'horizontal'
+        ? Math.max(...bounds.map((b) => b.maxX))
+        : Math.max(...bounds.map((b) => b.maxY));
+      const mirror = (v: number) => min + max - v;
+
+      const horizontal = axis === 'horizontal';
+
+      els.forEach((el) => {
+        if (el.type === ShapeType.FREEHAND) {
+          const fh = el as FreehandElement;
+          fh.points = fh.points.map((p) =>
+            horizontal ? [mirror(p[0]), p[1], p[2]] : [p[0], mirror(p[1]), p[2]]
+          );
+          // A freehand element's box is derived from its points, so it has to
+          // be recomputed here — selection and hit testing read x/y/w/h.
+          const b = getElementBBox(fh);
+          fh.x = b.minX; fh.y = b.minY;
+          fh.width = b.maxX - b.minX;
+          fh.height = b.maxY - b.minY;
+        } else if (el.type === ShapeType.CONNECTOR) {
+          const c = el as ConnectorElement;
+          if (horizontal) {
+            c.startX = mirror(c.startX); c.endX = mirror(c.endX);
+          } else {
+            c.startY = mirror(c.startY); c.endY = mirror(c.endY);
+          }
+          c.controlPoints = c.controlPoints?.map((cp) =>
+            horizontal ? { x: mirror(cp.x), y: cp.y } : { x: cp.x, y: mirror(cp.y) }
+          );
+        } else if (el.type === ShapeType.LINE || el.type === ShapeType.ARROW) {
+          // width/height are a signed delta here, so the sign flips with it.
+          if (horizontal) { el.x = mirror(el.x); el.width = -el.width; }
+          else { el.y = mirror(el.y); el.height = -el.height; }
+        } else {
+          // Rect-based: the mirrored left edge is the mirror of the right edge.
+          // Sizes are normalised to positive here — a shape dragged out
+          // right-to-left carries a negative width, and mirroring that without
+          // normalising puts the box in the wrong place.
+          if (horizontal) {
+            const w = Math.abs(el.width);
+            el.x = mirror(Math.min(el.x, el.x + el.width) + w);
+            el.width = w;
+          } else {
+            const h = Math.abs(el.height);
+            el.y = mirror(Math.min(el.y, el.y + el.height) + h);
+            el.height = h;
+          }
+          if (el.type === ShapeType.IMAGE) {
+            const img = el as ImageElement;
+            if (horizontal) img.flipX = !img.flipX; else img.flipY = !img.flipY;
+          }
+        }
+        // A mirrored rotation turns the other way.
+        if (el.rotation) el.rotation = -el.rotation;
+        el.bbox = getElementBBox(el);
+      });
+    }),
+
+    // ── Style clipboard ────────────────────────────────────────────────────
+    styleClipboard: null,
+
+    copyStyle: () => set((state) => {
+      const first = Array.from(state.selectedIds)
+        .map((id) => state.elements[id])
+        .find(Boolean);
+      if (first) state.styleClipboard = { ...first.style };
+    }),
+
+    pasteStyle: () => set((state) => {
+      const style = state.styleClipboard;
+      const ids = Array.from(state.selectedIds);
+      if (!style || ids.length === 0) return;
+      pushHistory(state);
+      ids.forEach((id) => {
+        const el = state.elements[id];
+        if (el) el.style = { ...style };
+      });
+    }),
+
     zoomToFit: () => set((state) => {
       // Zoom to selected elements if any, otherwise all elements
       const targetIds = state.selectedIds.size > 0 ? Array.from(state.selectedIds) : Object.keys(state.elements);
@@ -835,6 +1059,48 @@ export const useCanvasStore = create<CanvasState>()(
         zoom,
         x: -minX * zoom + (vw - scaledW) / 2,
         y: -minY * zoom + (vh - scaledH) / 2,
+      };
+    }),
+
+    loadScene: (loaded, background) => set((state) => {
+      pushHistory(state);
+      state.elements = {};
+      loaded.forEach((el) => {
+        state.elements[el.id] = { ...el, bbox: getElementBBox(el) } as typeof state.elements[string];
+      });
+      state.selectedIds.clear();
+      // Bindings are rebuilt from the loaded connectors, not carried in the file.
+      state.connectorsByElement = new Map();
+      loaded.forEach((el) => {
+        if (el.type !== ShapeType.CONNECTOR) return;
+        const conn = el as ConnectorElement;
+        [conn.startElementId, conn.endElementId].forEach((target) => {
+          if (!target) return;
+          if (!state.connectorsByElement.has(target)) state.connectorsByElement.set(target, new Set());
+          state.connectorsByElement.get(target)!.add(conn.id);
+        });
+      });
+      if (background) {
+        state.canvasBackground = background;
+        state.isCanvasBackgroundCustomized = true;
+      }
+    }),
+
+    /** Pan (without zooming) so the drawing is back on screen. */
+    scrollToContent: () => set((state) => {
+      const els = Object.values(state.elements);
+      if (els.length === 0) return;
+      const boxes = els.map((el) => el.bbox ?? getElementBBox(el));
+      const minX = Math.min(...boxes.map((b) => b.minX));
+      const minY = Math.min(...boxes.map((b) => b.minY));
+      const maxX = Math.max(...boxes.map((b) => b.maxX));
+      const maxY = Math.max(...boxes.map((b) => b.maxY));
+      const vw = state.viewport.width || window.innerWidth;
+      const vh = state.viewport.height || window.innerHeight;
+      state.viewport = {
+        ...state.viewport,
+        x: vw / 2 - ((minX + maxX) / 2) * state.viewport.zoom,
+        y: vh / 2 - ((minY + maxY) / 2) * state.viewport.zoom,
       };
     }),
 

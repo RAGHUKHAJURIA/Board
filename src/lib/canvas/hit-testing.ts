@@ -181,6 +181,9 @@ export function hitTestPoint(
 
   const sorted = Object.values(elements)
     .filter(el => !ignoreSet.has(el.id) && !el.locked)
+    // Text bound inside a shape belongs to that shape: clicking it selects the
+    // container, which the container's own hit test below already handles.
+    .filter(el => !(el.type === 'text' && (el as TextElement).containerId))
     .filter(el => !options?.onlyTypes || options.onlyTypes.includes(el.type))
     .sort((a, b) => (b.zIndex ?? 0) - (a.zIndex ?? 0));
 

@@ -17,6 +17,7 @@ import {
   ShapeType,
   FreehandElement,
   ConnectorElement,
+  TextElement,
   Point,
 } from '@/types';
 
@@ -325,6 +326,12 @@ export function getElementsInSelectionBox(
 
   return Object.values(elements)
     .filter(el => {
+      // Locked elements are not selectable — hitTestPoint already skips them,
+      // and a rubber band that scooped them up would contradict that.
+      if (el.locked) return false;
+      // Bound labels come along with their container, never on their own.
+      if (el.type === ShapeType.TEXT && (el as TextElement).containerId) return false;
+
       // Get element bounding box (handling connectors, freehand, negative dims)
       let elMinX: number, elMinY: number, elMaxX: number, elMaxY: number;
 

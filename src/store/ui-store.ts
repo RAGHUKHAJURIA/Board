@@ -15,8 +15,11 @@ interface UIState {
   snap: SnapSettings;
   theme: "dark" | "light" | "system";
   currentStyle: StyleProperties;
+  /** Which modal is open. Lives here so the menu and the keyboard agree. */
+  dialog: "help" | "export" | null;
 
   // Actions
+  setDialog: (dialog: UIState["dialog"]) => void;
   togglePanel: (panel: keyof UIState["panels"]) => void;
   updateGrid: (settings: Partial<GridSettings>) => void;
   updateSnap: (settings: Partial<SnapSettings>) => void;
@@ -56,6 +59,13 @@ export const useUIStore = create<UIState>()(
         strokeStyle: "solid",
         penType: "pen",
       },
+
+      dialog: null,
+
+      setDialog: (dialog) =>
+        set((state) => {
+          state.dialog = dialog;
+        }),
 
       togglePanel: (panel) =>
         set((state) => {

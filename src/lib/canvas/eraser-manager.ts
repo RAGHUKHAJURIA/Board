@@ -1,14 +1,20 @@
 /**
- * BULLETPROOF ERASER MANAGER
+ * ERASER MANAGER
  *
- * Key design decisions:
- * 1. Uses an eraser PATH (multi-point) not just the current point.
- *    → Eliminates "missed objects" when moving the mouse quickly.
- * 2. Keeps a `pendingDeleteIds` set so the same element is never double-processed
- *    within a single gesture even if the spatial index hasn't been rebuilt yet.
- * 3. Removes deleted elements from the spatial index immediately.
- * 4. For FreehandElement: points are ABSOLUTE world coords [x, y, pressure?].
- *    We do NOT add element.x/element.y to them.
+ * Excalidraw-style two-phase erase:
+ *   1. While the pointer is down we only *mark* what the eraser has touched.
+ *      Nothing is written to the store, so a drag costs no re-renders and no
+ *      history entries — the previous version deleted and re-created elements
+ *      on every single pointermove, which is what made erasing stutter on
+ *      tablets and phones.
+ *   2. On pointer-up the caller asks for `getResult()` and applies it once.
+ *
+ * Marks are cumulative per-point flags rather than a replayed path, so the
+ * eraser never needs to keep the whole gesture's trail around: each batch of
+ * new samples only has to be tested against the points not already erased.
+ *
+ * FreehandElement.points are ABSOLUTE world coords [x, y, pressure] — element
+ * .x/.y is not added to them.
  */
 
 import { SpatialIndex } from './spatial-index';
@@ -35,14 +41,28 @@ export interface EraserSettings {
   mode: 'object' | 'partial';
 }
 
-// Max path points to keep per gesture (performance cap).
-// At 60fps and ~500px/s movement, 20 points cover ≈330ms of travel.
-const MAX_PATH_LEN = 32;
+/** One capsule of the eraser sweep: the segment between two consecutive samples. */
+type Segment = [Point, Point];
+
+/**
+ * An element being partially erased, decomposed into freehand pieces
+ * (a freehand stroke is one piece; a rectangle is its four edges) plus a
+ * per-point "has been erased" flag for each piece.
+ */
+interface PartialTarget {
+  pieces: FreehandElement[];
+  flags: boolean[][];
+  touched: boolean;   // true once at least one point has actually been erased
+}
 
 export class EraserManager {
   private spatialIndex: SpatialIndex;
-  private path: Point[] = [];                // multi-point eraser trail
-  private pendingDeleteIds = new Set<string>(); // already scheduled for deletion
+  private lastPoint: Point | null = null;
+  /** Object mode (and non-splittable elements in partial mode): delete whole. */
+  private marked = new Set<string>();
+  /** Partial mode: id → decomposed pieces and their erased-point flags. */
+  private partials = new Map<string, PartialTarget>();
+  private survivorCache: FreehandElement[] | null = null;
 
   constructor(spatialIndex: SpatialIndex) {
     this.spatialIndex = spatialIndex;
@@ -53,79 +73,136 @@ export class EraserManager {
   // -------------------------------------------------------------------------
 
   startErase(worldPos: Point) {
-    this.path = [worldPos];
-    this.pendingDeleteIds.clear();
+    this.lastPoint = worldPos;
+    this.marked.clear();
+    this.partials.clear();
+    this.survivorCache = null;
   }
 
   /**
-   * Main erase call — invoke on every pointermove.
-   * Returns toDelete / toAdd lists; caller must apply them to the store.
+   * Feed every sample collected since the last call (pass all coalesced points,
+   * not just the latest — that is what keeps fast strokes from being missed).
+   * Returns true when the preview changed and the canvas needs a repaint.
    */
-  erase(
-    currentWorldPos: Point,
+  extend(
+    points: Point[],
     elements: Record<string, WhiteboardElement>,
     settings: EraserSettings,
     zoom: number
-  ): { toDelete: string[]; toAdd: WhiteboardElement[] } {
-    // Convert screen-pixel radius → world radius  (Excalidraw's formula)
-    const worldRadius = settings.size / 2 / zoom;
+  ): boolean {
+    if (points.length === 0) return false;
 
-    // Append current position to path
-    this.path.push(currentWorldPos);
-    if (this.path.length > MAX_PATH_LEN) this.path.shift();
+    const eraserRadius = settings.size / 2 / zoom;
 
-    // Bounding box that covers the entire path + radius padding
-    const sweepBBox = this._pathBBox(worldRadius);
+    // Build the capsule segments covering the movement since the last call.
+    // A tap (first sample, no previous point) becomes one zero-length capsule.
+    const segments: Segment[] = [];
+    let prev = this.lastPoint ?? points[0]!;
+    for (const p of points) {
+      segments.push([prev, p]);
+      prev = p;
+    }
+    this.lastPoint = prev;
 
-    // O(log N) spatial query
+    const sweepBBox = this._segmentsBBox(segments, eraserRadius);
     const candidates = this.spatialIndex.search(sweepBBox);
 
-    const toDelete: string[] = [];
-    const toAdd: WhiteboardElement[] = [];
+    let changed = false;
 
     for (const candidate of candidates) {
-      if (this.pendingDeleteIds.has(candidate.id)) continue;
-
       const element = elements[candidate.id];
-      if (!element) continue;   // deleted from store but not yet from index
+      if (!element || element.locked) continue;
+      if (this.marked.has(candidate.id)) continue;
+
+      // Thin strokes are easier to hit if the element's own width counts.
+      const radius = eraserRadius + (element.style?.strokeWidth ?? 2) / 2;
 
       if (settings.mode === 'object') {
-        if (this._hitTestElement(element, worldRadius)) {
-          this._scheduleDelete(element.id, toDelete);
+        if (this._hitTest(element, segments, radius)) {
+          this.marked.add(candidate.id);
+          changed = true;
         }
-
-      } else {
-        // ── Partial mode ─────────────────────────────────────────────────
-        if (element.type === ShapeType.FREEHAND) {
-          const res = this._partialEraseFreehand(element as FreehandElement, worldRadius);
-          if (res.modified) {
-            this._scheduleDelete(element.id, toDelete);
-            toAdd.push(...res.newElements);
-          }
-        } else {
-          // Non-freehand: convert to freehand edges, then partially erase each
-          if (this._hitTestElement(element, worldRadius)) {
-            this._scheduleDelete(element.id, toDelete);
-            const edges = convertShapeToFreehand(element as ShapeElement);
-            for (const edge of edges) {
-              const res = this._partialEraseFreehand(edge, worldRadius);
-              if (res.modified) {
-                toAdd.push(...res.newElements);
-              } else {
-                toAdd.push(edge);
-              }
-            }
-          }
-        }
+        continue;
       }
+
+      // ── Partial mode ─────────────────────────────────────────────────────
+      let target = this.partials.get(candidate.id);
+      if (!target) {
+        // Don't pay for decomposition until the eraser actually reaches it.
+        if (!this._hitTest(element, segments, radius)) continue;
+
+        const pieces = this._decompose(element);
+        if (!pieces) {
+          // Images, text, icons and connectors can't be split — erase whole.
+          this.marked.add(candidate.id);
+          changed = true;
+          continue;
+        }
+        target = {
+          pieces,
+          flags: pieces.map((p) => new Array<boolean>(p.points.length).fill(false)),
+          touched: false,
+        };
+        this.partials.set(candidate.id, target);
+      }
+
+      if (this._eraseFlags(target, segments, radius)) changed = true;
     }
 
-    return { toDelete, toAdd };
+    if (changed) this.survivorCache = null;
+    return changed;
+  }
+
+  /** Elements pending whole deletion — the canvas ghosts these. */
+  getMarkedIds(): Set<string> {
+    return this.marked;
+  }
+
+  /**
+   * Elements mid-split — the canvas hides these and draws `getSurvivors()`
+   * on the overlay in their place.
+   */
+  getHiddenIds(): Set<string> {
+    const ids = new Set<string>();
+    this.partials.forEach((target, id) => {
+      if (target.touched) ids.add(id);
+    });
+    return ids;
+  }
+
+  /** The pieces that survive the erase so far, for preview and for commit. */
+  getSurvivors(): FreehandElement[] {
+    if (this.survivorCache) return this.survivorCache;
+
+    const out: FreehandElement[] = [];
+    this.partials.forEach((target: PartialTarget) => {
+      if (!target.touched) return;
+      target.pieces.forEach((piece, i) => {
+        out.push(...splitByFlags(piece, target.flags[i]!));
+      });
+    });
+    this.survivorCache = out;
+    return out;
+  }
+
+  /** Whether anything at all would change if this gesture were committed now. */
+  hasChanges(): boolean {
+    return this.marked.size > 0 || this.getHiddenIds().size > 0;
+  }
+
+  /** What the caller should apply to the store, once, on pointer-up. */
+  getResult(): { toDelete: string[]; toAdd: FreehandElement[] } {
+    return {
+      toDelete: Array.from(this.marked).concat(Array.from(this.getHiddenIds())),
+      toAdd: this.getSurvivors(),
+    };
   }
 
   endErase() {
-    this.path = [];
-    this.pendingDeleteIds.clear();
+    this.lastPoint = null;
+    this.marked.clear();
+    this.partials.clear();
+    this.survivorCache = null;
   }
 
   reset() {
@@ -136,34 +213,84 @@ export class EraserManager {
   // Private helpers
   // -------------------------------------------------------------------------
 
-  private _scheduleDelete(id: string, toDelete: string[]) {
-    toDelete.push(id);
-    this.pendingDeleteIds.add(id);
-    this.spatialIndex.remove(id);   // immediate removal — no stale-index misses
+  private _segmentsBBox(segments: Segment[], radius: number) {
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const [a, b] of segments) {
+      minX = Math.min(minX, a.x, b.x);
+      minY = Math.min(minY, a.y, b.y);
+      maxX = Math.max(maxX, a.x, b.x);
+      maxY = Math.max(maxY, a.y, b.y);
+    }
+    return {
+      minX: minX - radius, minY: minY - radius,
+      maxX: maxX + radius, maxY: maxY + radius,
+    };
   }
 
-  /** AABB that covers the entire current path + radius padding */
-  private _pathBBox(radius: number) {
-    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-    for (const p of this.path) {
-      if (p.x - radius < minX) minX = p.x - radius;
-      if (p.y - radius < minY) minY = p.y - radius;
-      if (p.x + radius > maxX) maxX = p.x + radius;
-      if (p.y + radius > maxY) maxY = p.y + radius;
+  /** Split an element into erasable freehand pieces, or null if it can't be. */
+  private _decompose(element: WhiteboardElement): FreehandElement[] | null {
+    if (element.type === ShapeType.FREEHAND) {
+      const fh = element as FreehandElement;
+      return fh.points && fh.points.length >= 2 ? [fh] : null;
     }
-    return { minX, minY, maxX, maxY };
+    if (
+      element.type === ShapeType.IMAGE ||
+      element.type === ShapeType.TEXT ||
+      element.type === ShapeType.ICON ||
+      element.type === ShapeType.CONNECTOR
+    ) {
+      return null;
+    }
+    const edges = convertShapeToFreehand(element as ShapeElement);
+    return edges.length > 0 ? edges : null;
   }
 
   /**
-   * Hit-test an element against the ENTIRE eraser path.
-   * Every consecutive pair of path points forms a capsule.
-   * We return true as soon as any capsule hits the element.
+   * Flag every point of every piece that the new capsules cover.
+   * Points already flagged are skipped, so cost falls as the erase proceeds.
    */
-  private _hitTestElement(element: WhiteboardElement, radius: number): boolean {
-    for (let i = 0; i < this.path.length; i++) {
-      const a = this.path[i]!;
-      // For the very first point use a zero-length capsule (single-point test)
-      const b = i + 1 < this.path.length ? this.path[i + 1]! : a;
+  private _eraseFlags(target: PartialTarget, segments: Segment[], radius: number): boolean {
+    const r2 = radius * radius;
+    let changed = false;
+
+    target.pieces.forEach((piece, pieceIdx) => {
+      const flags = target.flags[pieceIdx]!;
+      const pts = piece.points;
+
+      for (let i = 0; i < pts.length; i++) {
+        if (flags[i]) continue;
+        const pt = pts[i]!;
+        const p: Point = { x: pt[0], y: pt[1] };
+
+        let hit = false;
+        for (const [a, b] of segments) {
+          if (pointToSegmentDistanceSq(p, a, b) <= r2) { hit = true; break; }
+        }
+
+        // Sparse strokes (a straight line has few points) would otherwise let
+        // the eraser pass between two samples without touching either.
+        if (!hit && i > 0) {
+          const q = pts[i - 1]!;
+          const mid: Point = { x: (pt[0] + q[0]) / 2, y: (pt[1] + q[1]) / 2 };
+          for (const [a, b] of segments) {
+            if (pointToSegmentDistanceSq(mid, a, b) <= r2) { hit = true; break; }
+          }
+        }
+
+        if (hit) {
+          flags[i] = true;
+          changed = true;
+        }
+      }
+    });
+
+    if (changed) target.touched = true;
+    return changed;
+  }
+
+  /** Does any capsule in this batch touch the element? */
+  private _hitTest(element: WhiteboardElement, segments: Segment[], radius: number): boolean {
+    for (const [a, b] of segments) {
       if (this._capsuleHitsElement(a, b, element, radius)) return true;
     }
     return false;
@@ -200,9 +327,10 @@ export class EraserManager {
       // ── Rectangles / Text / Image ─────────────────────────────────────
       case ShapeType.RECTANGLE:
       case ShapeType.TEXT:
-      case ShapeType.IMAGE: {
+      case ShapeType.IMAGE:
+      case ShapeType.ICON: {
         const verts = getElementCorners({ ...element, rotation: 0 });
-        return capsuleHitsPolygon(p1, p2, radius, verts, isFilled);
+        return capsuleHitsPolygon(p1, p2, radius, verts, isFilled || element.type !== ShapeType.RECTANGLE);
       }
 
       // ── Triangle ────────────────────────────────────────────────────────
@@ -228,18 +356,27 @@ export class EraserManager {
         return capsuleHitsPolygon(p1, p2, radius, verts, isFilled);
       }
 
-      // ── Hexagon ──────────────────────────────────────────────────────────
+      // ── Pentagon / Hexagon ──────────────────────────────────────────────
+      case ShapeType.PENTAGON:
       case ShapeType.HEXAGON: {
         const { x, y, width, height } = element;
         const mx = x + width / 2;
-        const verts: Point[] = [
-          { x: mx, y },
-          { x: x + width, y: y + height / 4 },
-          { x: x + width, y: y + height * 0.75 },
-          { x: mx, y: y + height },
-          { x, y: y + height * 0.75 },
-          { x, y: y + height / 4 },
-        ];
+        const verts: Point[] = element.type === ShapeType.HEXAGON
+          ? [
+              { x: mx, y },
+              { x: x + width, y: y + height / 4 },
+              { x: x + width, y: y + height * 0.75 },
+              { x: mx, y: y + height },
+              { x, y: y + height * 0.75 },
+              { x, y: y + height / 4 },
+            ]
+          : [
+              { x: mx, y },
+              { x: x + width, y: y + height * 0.38 },
+              { x: x + width * 0.81, y: y + height },
+              { x: x + width * 0.19, y: y + height },
+              { x, y: y + height * 0.38 },
+            ];
         return capsuleHitsPolygon(p1, p2, radius, verts, isFilled);
       }
 
@@ -317,111 +454,60 @@ export class EraserManager {
         return false;
       }
 
-      // ── Fallback ─────────────────────────────────────────────────────────
+      // ── Fallback for any element type added later ────────────────────────
       default: {
-        const bbox = element.bbox ?? {
-          minX: element.x,
-          minY: element.y,
-          maxX: element.x + element.width,
-          maxY: element.y + element.height,
+        const el = element as WhiteboardElement;
+        const bbox = el.bbox ?? {
+          minX: el.x,
+          minY: el.y,
+          maxX: el.x + el.width,
+          maxY: el.y + el.height,
         };
         return bboxIntersectsCapsule(bbox, p1, p2, radius);
       }
     }
   }
+}
 
-  // -------------------------------------------------------------------------
-  // Partial erase (freehand stroke splitting)
-  // -------------------------------------------------------------------------
+/**
+ * Cut a stroke into the runs of points the eraser never touched.
+ * Runs shorter than two points aren't a visible stroke and are dropped.
+ */
+function splitByFlags(piece: FreehandElement, flags: boolean[]): FreehandElement[] {
+  const runs: { pts: [number, number, number?][]; isStart: boolean }[] = [];
+  let current: [number, number, number?][] = [];
+  let isStart = true;
 
-  /**
-   * Test each point of a freehand stroke against the ENTIRE eraser path,
-   * then split into surviving segments.
-   *
-   * NOTE: FreehandElement.points are ABSOLUTE world coordinates.
-   */
-  _partialEraseFreehand(
-    element: FreehandElement,
-    radius: number
-  ): { modified: boolean; newElements: FreehandElement[] } {
-    if (!element.points || element.points.length < 2) {
-      return { modified: false, newElements: [] };
+  for (let i = 0; i < piece.points.length; i++) {
+    if (flags[i]) {
+      if (current.length >= 2) runs.push({ pts: current, isStart });
+      current = [];
+      isStart = false;
+    } else {
+      current.push([...piece.points[i]!] as [number, number, number?]);
     }
-
-    const r2 = radius * radius;
-    const erased: boolean[] = new Array(element.points.length).fill(false);
-
-    // Test every point against every capsule segment in the path
-    for (let i = 0; i < element.points.length; i++) {
-      const pt = element.points[i]!;
-      const wp: Point = { x: pt[0], y: pt[1] };
-
-      for (let j = 0; j < this.path.length; j++) {
-        const pa = this.path[j]!;
-        const pb = j + 1 < this.path.length ? this.path[j + 1]! : pa;
-        if (pointToSegmentDistanceSq(wp, pa, pb) <= r2) {
-          erased[i] = true;
-          break;
-        }
-      }
-
-      // Also test midpoint to previous point
-      if (!erased[i] && i > 0) {
-        const prev = element.points[i - 1]!;
-        const mid: Point = { x: (pt[0] + prev[0]) / 2, y: (pt[1] + prev[1]) / 2 };
-        for (let j = 0; j < this.path.length; j++) {
-          const pa = this.path[j]!;
-          const pb = j + 1 < this.path.length ? this.path[j + 1]! : pa;
-          if (pointToSegmentDistanceSq(mid, pa, pb) <= r2) {
-            erased[i] = true;
-            break;
-          }
-        }
-      }
-    }
-
-    // Check if anything was erased
-    if (!erased.some(Boolean)) return { modified: false, newElements: [] };
-
-    // Split into surviving segments
-    const segments: { pts: [number, number, number?][]; isStart: boolean }[] = [];
-    let current: [number, number, number?][] = [];
-    let isStart = true;
-
-    for (let i = 0; i < element.points.length; i++) {
-      if (erased[i]) {
-        if (current.length >= 2) {
-          segments.push({ pts: [...current], isStart });
-        }
-        current = [];
-        isStart = false;
-      } else {
-        current.push([...element.points[i]!]);
-      }
-    }
-    if (current.length >= 2) {
-      segments.push({ pts: current, isStart });
-    }
-
-    // Build new FreehandElements from segments
-    const newElements = segments.map(({ pts, isStart: segIsStart }, idx) => {
-      const xs = pts.map(p => p[0]);
-      const ys = pts.map(p => p[1]);
-      const isEnd = idx === segments.length - 1;
-      return {
-        ...element,
-        id: uuidv4(),
-        points: pts,
-        x: Math.min(...xs),
-        y: Math.min(...ys),
-        width: Math.max(...xs) - Math.min(...xs),
-        height: Math.max(...ys) - Math.min(...ys),
-        zIndex: element.zIndex + Math.random() * 0.001,
-        taperStart: segIsStart ? element.taperStart : 0,
-        taperEnd: isEnd ? element.taperEnd : 0,
-      } as FreehandElement;
-    });
-
-    return { modified: true, newElements };
   }
+  if (current.length >= 2) runs.push({ pts: current, isStart });
+
+  return runs.map(({ pts, isStart: runIsStart }, idx) => {
+    const xs = pts.map((p) => p[0]);
+    const ys = pts.map((p) => p[1]);
+    const minX = Math.min(...xs);
+    const minY = Math.min(...ys);
+    return {
+      ...piece,
+      id: uuidv4(),
+      points: pts,
+      x: minX,
+      y: minY,
+      width: Math.max(...xs) - minX,
+      height: Math.max(...ys) - minY,
+      // Keep the fragments' paint order stable relative to the original.
+      zIndex: piece.zIndex + idx * 1e-6,
+      // Only the surviving head keeps the original start taper, only the
+      // surviving tail keeps the end taper; cut ends are blunt.
+      taperStart: runIsStart ? piece.taperStart : 0,
+      taperEnd: idx === runs.length - 1 ? piece.taperEnd : 0,
+    } as FreehandElement;
+  });
 }

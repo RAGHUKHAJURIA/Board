@@ -1,19 +1,37 @@
 'use client';
 
 import React from 'react';
-import { Minus, Plus, Maximize, Grid3X3, Magnet } from 'lucide-react';
+import { Minus, Plus, Maximize, Grid3X3, Magnet, Crosshair } from 'lucide-react';
 import { useCanvasStore } from '@/store/canvas-store';
 import { useUIStore } from '@/store/ui-store';
+import { getElementBBox } from '@/lib/utils/geometry';
 
 export function StatusBar() {
   const viewport = useCanvasStore(state => state.viewport);
   const elements = useCanvasStore(state => state.elements);
   const selectedIds = useCanvasStore(state => state.selectedIds);
-  const { setZoom, zoomToFit } = useCanvasStore();
+  const setZoom = useCanvasStore(s => s.setZoom);
+  const zoomToFit = useCanvasStore(s => s.zoomToFit);
+  const scrollToContent = useCanvasStore(s => s.scrollToContent);
+
+  // Excalidraw's "scroll back to content": only offered when you have actually
+  // lost the drawing off the edge of the viewport.
+  const all = Object.values(elements);
+  const isLost = all.length > 0 && !all.some((el) => {
+    const b = el.bbox ?? getElementBBox(el);
+    const left = (b.minX * viewport.zoom) + viewport.x;
+    const top = (b.minY * viewport.zoom) + viewport.y;
+    const right = (b.maxX * viewport.zoom) + viewport.x;
+    const bottom = (b.maxY * viewport.zoom) + viewport.y;
+    return right > 0 && bottom > 0
+      && left < (viewport.width || window.innerWidth)
+      && top < (viewport.height || window.innerHeight);
+  });
 
   const grid = useUIStore(state => state.grid);
   const snap = useUIStore(state => state.snap);
-  const { updateGrid, updateSnap } = useUIStore();
+  const updateGrid = useUIStore(s => s.updateGrid);
+  const updateSnap = useUIStore(s => s.updateSnap);
 
   const handleZoom = (factor: number) => {
     setZoom(viewport.zoom * factor);
@@ -59,6 +77,16 @@ export function StatusBar() {
       >
         <Maximize size={14} />
       </button>
+
+      {isLost && (
+        <button
+          onClick={scrollToContent}
+          className="flex items-center gap-1 px-2 py-1.5 rounded bg-foreground text-background text-[11px] font-medium whitespace-nowrap"
+          title="Scroll back to content"
+        >
+          <Crosshair size={13} /> Back to content
+        </button>
+      )}
 
       <button
         onClick={() => updateGrid({ enabled: !grid.enabled })}

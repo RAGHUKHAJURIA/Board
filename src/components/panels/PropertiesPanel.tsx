@@ -12,12 +12,20 @@ import {
 import { useCanvasStore } from '@/store/canvas-store';
 import { useUIStore } from '@/store/ui-store';
 import { ColorPicker } from '../toolbar/ColorPicker';
-import { WhiteboardElement, ShapeType, ConnectorElement, ImageElement } from '@/types';
+import { WhiteboardElement, ShapeType, ConnectorElement, ImageElement, TextElement } from '@/types';
+import { layoutText, FONT_FAMILIES } from '@/lib/canvas/text';
 
 export function PropertiesPanel() {
   const elements = useCanvasStore(state => state.elements);
   const selectedIds = useCanvasStore(state => state.selectedIds);
-  const { updateElement, bringToFront, sendToBack, bringForward, sendBackward, alignElements } = useCanvasStore();
+  // Per-action selectors: destructuring useCanvasStore() subscribes to the
+  // whole store and re-renders this panel on every write anywhere.
+  const updateElement = useCanvasStore(s => s.updateElement);
+  const bringToFront = useCanvasStore(s => s.bringToFront);
+  const sendToBack = useCanvasStore(s => s.sendToBack);
+  const bringForward = useCanvasStore(s => s.bringForward);
+  const sendBackward = useCanvasStore(s => s.sendBackward);
+  const alignElements = useCanvasStore(s => s.alignElements);
 
   const panels = useUIStore(state => state.panels);
   const togglePanel = useUIStore(state => state.togglePanel);
@@ -47,6 +55,18 @@ export function PropertiesPanel() {
 
   const handleStyleChange = (key: string, value: string | number) => {
     handleChange({ style: { ...element.style, [key]: value } });
+  };
+
+  /** Text edits re-measure, so the box keeps matching the glyphs. */
+  const handleTextChange = (el: TextElement, patch: Partial<TextElement>) => {
+    const next = { ...el, ...patch };
+    const container = next.containerId ? elements[next.containerId] : undefined;
+    const { width, height } = layoutText(next, container);
+    updateElement(el.id, {
+      ...patch,
+      width: container ? Math.abs(container.width) : width,
+      height,
+    });
   };
 
   return (
@@ -237,6 +257,64 @@ export function PropertiesPanel() {
                 ))}
               </div>
             </div>
+          )}
+
+          {/* Text options */}
+          {element.type === ShapeType.TEXT && (
+            <>
+              <div className="flex flex-col gap-1">
+                <div className="flex justify-between text-[10px] text-zinc-500 dark:text-zinc-400">
+                  <span>Font Size</span><span>{(element as TextElement).fontSize || 18}px</span>
+                </div>
+                <input
+                  type="range" min="8" max="96" step="1"
+                  value={(element as TextElement).fontSize || 18}
+                  onChange={(e) => handleTextChange(element as TextElement, { fontSize: parseInt(e.target.value) })}
+                  className="accent-foreground"
+                />
+              </div>
+
+              <div className="flex flex-col gap-1">
+                <span className="text-[10px] text-zinc-500 dark:text-zinc-400">Font</span>
+                <div className="flex gap-2">
+                  {FONT_FAMILIES.map((f) => (
+                    <button
+                      key={f.value}
+                      onClick={() => handleTextChange(element as TextElement, { fontFamily: f.value })}
+                      style={{ fontFamily: f.value }}
+                      className={`flex-1 px-2 py-1 text-xs rounded border ${
+                        ((element as TextElement).fontFamily || FONT_FAMILIES[0].value) === f.value
+                          ? 'border-foreground bg-foreground text-background font-medium'
+                          : 'border-zinc-300 dark:border-zinc-700 text-zinc-500 hover:border-zinc-500'
+                      }`}
+                    >
+                      {f.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {!(element as TextElement).containerId && (
+                <div className="flex flex-col gap-1">
+                  <span className="text-[10px] text-zinc-500 dark:text-zinc-400">Align</span>
+                  <div className="flex gap-2">
+                    {(['left', 'center', 'right'] as const).map((a) => (
+                      <button
+                        key={a}
+                        onClick={() => handleTextChange(element as TextElement, { textAlign: a })}
+                        className={`flex-1 px-2 py-1 text-xs rounded border capitalize ${
+                          ((element as TextElement).textAlign ?? 'left') === a
+                            ? 'border-foreground bg-foreground text-background font-medium'
+                            : 'border-zinc-300 dark:border-zinc-700 text-zinc-500 hover:border-zinc-500'
+                        }`}
+                      >
+                        {a}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </>
           )}
 
           {/* Connector Routing Mode */}

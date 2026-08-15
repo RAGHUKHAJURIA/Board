@@ -81,18 +81,19 @@ export class ImageHandler {
     });
   }
 
-  drawImage(ctx: CanvasRenderingContext2D, element: ImageElement) {
-    if (!element.src) return;
+  /** Returns false while the bitmap is still decoding, so the caller knows to repaint. */
+  drawImage(ctx: CanvasRenderingContext2D, element: ImageElement): boolean {
+    if (!element.src) return true;
 
     let img = ImageHandler.imageCache.get(element.id);
-    
+
     if (!img) {
       img = new Image();
       img.src = element.src;
       ImageHandler.imageCache.set(element.id, img);
     }
 
-    if (!img.complete) return;
+    if (!img.complete) return false;
 
     ctx.save();
     
@@ -110,5 +111,6 @@ export class ImageHandler {
 
     ctx.drawImage(img, element.x, element.y, element.width, element.height);
     ctx.restore();
+    return true;
   }
 }

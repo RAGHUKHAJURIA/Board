@@ -46,6 +46,12 @@ export interface BaseElement {
   zIndex: number;
   style: StyleProperties;
   bbox?: BoundingBox;
+  /**
+   * Groups this element belongs to, outermost first — same shape as
+   * Excalidraw's, so nesting works: grouping a selection appends one new id to
+   * every member, ungrouping pops the outermost id they all share.
+   */
+  groupIds?: string[];
 }
 
 export interface ShapeElement extends BaseElement {
@@ -67,6 +73,13 @@ export interface TextElement extends BaseElement {
   fontSize: number;
   fontFamily: string;
   color: string;
+  textAlign?: 'left' | 'center' | 'right';
+  /**
+   * Set when this text is a label bound inside a shape. Bound text is drawn
+   * centred in its container and is not independently selectable — you select
+   * the shape, exactly as in Excalidraw.
+   */
+  containerId?: string | null;
 }
 
 export interface ImageElement extends BaseElement {

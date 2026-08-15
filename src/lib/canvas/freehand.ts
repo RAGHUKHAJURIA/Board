@@ -207,6 +207,29 @@ function renderHighlighter(
   ctx.globalCompositeOperation = 'source-over';
 }
 
+/**
+ * The outline of a stroke as an SVG path `d` string, for the SVG exporter.
+ * Uses the same perfect-freehand settings as the canvas `pen` renderer so an
+ * exported stroke matches what is on screen.
+ */
+export function freehandOutlinePath(element: FreehandElement): string {
+  const { points, simulatePressure, taperStart, taperEnd, style } = element;
+  if (points.length === 0) return '';
+  const baseWidth = style.strokeWidth || 2;
+  const fountain = style.penType === 'fountain';
+  const outline = getStroke(points as [number, number, number][], {
+    size: baseWidth * (fountain ? 4 : 2),
+    thinning: fountain ? 0.8 : 0.5,
+    smoothing: fountain ? 0.8 : 0.62,
+    streamline: fountain ? 0.7 : 0.62,
+    easing: fountain ? (t: number) => Math.sin((t * Math.PI) / 2) : (t: number) => t,
+    simulatePressure: simulatePressure !== false,
+    start: { taper: taperStart !== undefined ? taperStart : (fountain ? baseWidth * 3 : 0), cap: true },
+    end: { taper: taperEnd !== undefined ? taperEnd : (fountain ? baseWidth * 3 : baseWidth), cap: true },
+  });
+  return svgPath(outline);
+}
+
 /* ── Shared SVG-path builder for perfect-freehand output ── */
 function svgPath(stroke: number[][]): string {
   if (!stroke.length) return '';

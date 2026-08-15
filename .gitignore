@@ -38,3 +38,6 @@ yarn-error.log*
 next-env.d.ts
 ARROW_FEATURE_DOCS.md
 STYLUS_AND_PEN_ARCHITECTURE.md
+
+# self-check build output (src/**/*.check.ts)
+.check/

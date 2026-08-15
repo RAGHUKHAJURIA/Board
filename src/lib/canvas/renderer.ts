@@ -6,6 +6,7 @@ import { ImageHandler } from './image-handler';
 import { ConnectorManager } from './connectors';
 import { RoughRenderer } from './rough-renderer';
 import { drawIconElement, getIconBitmapSync, getIconBitmap } from './icon-renderer';
+import { layoutText, measureLine, fontString, FONT_FAMILIES } from './text';
 
 // These were re-allocated on every frame — 240 throwaway objects a second at
 // 60fps, all of them stateless. Cache them per canvas node instead.
@@ -16,6 +17,17 @@ let helpers: {
   imageHandler: ImageHandler;
   connectorManager: ConnectorManager;
 } | null = null;
+
+const GHOST_ALPHA = 0.25;
+
+/** Shallow copy with its opacity knocked down, for the eraser's live preview. */
+const ghost = (el: WhiteboardElement): WhiteboardElement => ({
+  ...el,
+  style: { ...el.style, opacity: (el.style?.opacity ?? 1) * GHOST_ALPHA },
+  ...(el.type === ShapeType.IMAGE
+    ? { opacity: ((el as ImageElement).opacity ?? 100) * GHOST_ALPHA }
+    : {}),
+} as WhiteboardElement);
 
 const getRenderHelpers = (canvas: HTMLCanvasElement) => {
   if (helperCanvas !== canvas || !helpers) {
@@ -30,6 +42,17 @@ const getRenderHelpers = (canvas: HTMLCanvasElement) => {
   return helpers;
 };
 
+/** Elements the eraser is currently working on: `faded` are pending deletion,
+ *  `hidden` are being partially erased and are drawn on the overlay instead. */
+export interface ErasePreview {
+  faded: Set<string>;
+  hidden: Set<string>;
+}
+
+/**
+ * Paints the board. Returns true when an image or icon was still loading, i.e.
+ * the caller should schedule one more frame.
+ */
 export const renderCanvas = (
   canvas: HTMLCanvasElement,
   elements: WhiteboardElement[],
@@ -37,19 +60,25 @@ export const renderCanvas = (
   viewport: Viewport,
   grid: GridSettings,
   canvasBackground: string = '#1e1e1e',
-  resolvedTheme: 'light' | 'dark' = 'dark'
-) => {
+  erasePreview?: ErasePreview
+): boolean => {
   const ctx = canvas.getContext('2d');
-  if (!ctx) return;
+  if (!ctx) return false;
+
+  let assetsPending = false;
 
   // Draw background (zoom-safe — reset transform first)
   ctx.save();
   ctx.setTransform(1, 0, 0, 1, 0, 0);
-  const bgFill = canvasBackground === 'transparent'
-    ? (resolvedTheme === 'light' ? '#ffffff' : '#000000')
-    : canvasBackground;
-  ctx.fillStyle = bgFill;
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  if (canvasBackground === 'transparent') {
+    // Actually transparent, not "theme colour instead": PNG export with a
+    // transparent background depends on the alpha channel surviving, and on
+    // screen the themed container behind the canvas shows through anyway.
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+  } else {
+    ctx.fillStyle = canvasBackground;
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+  }
   ctx.restore();
 
   // Apply viewport
@@ -79,7 +108,16 @@ export const renderCanvas = (
   const cullMaxY = cullMinY + viewH / viewport.zoom + slack * 2;
 
   // Render Elements
-  sortedElements.forEach((element) => {
+  sortedElements.forEach((original) => {
+
+    // Mid-erase: partially-erased elements are drawn on the overlay as their
+    // surviving pieces, so the original must not be painted underneath them.
+    if (erasePreview?.hidden.has(original.id)) return;
+
+    // Marked for deletion by the eraser — ghost it until the pen lifts.
+    // Done by lowering the element's own opacity rather than ctx.globalAlpha,
+    // because every renderer below assigns globalAlpha rather than multiplying.
+    const element = erasePreview?.faded.has(original.id) ? ghost(original) : original;
 
     // Connectors are exempt: their x/y/width/height don't bound the drawn path.
     if (element.type !== ShapeType.CONNECTOR) {
@@ -96,6 +134,9 @@ export const renderCanvas = (
 
     ctx.save();
 
+    // Marked for deletion by the eraser — show it ghosted until the pen lifts.
+    if (erasePreview?.faded.has(element.id)) ctx.globalAlpha = 0.25;
+
     if (element.rotation) {
       if (element.type !== ShapeType.FREEHAND) {
         const cx = element.x + element.width / 2;
@@ -109,24 +150,9 @@ export const renderCanvas = (
     if (element.type === ShapeType.FREEHAND) {
       renderFreehand(ctx, element);
     } else if (element.type === ShapeType.IMAGE) {
-      imageHandler.drawImage(ctx, element as ImageElement);
+      if (!imageHandler.drawImage(ctx, element as ImageElement)) assetsPending = true;
     } else if (element.type === ShapeType.TEXT) {
-      const textEl = element as TextElement;
-      const fontSize = textEl.fontSize || 18;
-      const fontFamily = textEl.fontFamily || 'Inter, sans-serif';
-      ctx.font = `${fontSize}px ${fontFamily}`;
-      ctx.fillStyle = textEl.color || textEl.style.stroke;
-      ctx.globalAlpha = textEl.style.opacity;
-      ctx.textBaseline = 'top';
-      
-      // Multi-line text support
-      const lines = (textEl.text || '').split('\n');
-      const lineHeight = fontSize * 1.4;
-      lines.forEach((line, i) => {
-        ctx.fillText(line, textEl.x, textEl.y + i * lineHeight);
-      });
-      
-      ctx.globalAlpha = 1;
+      renderText(ctx, element as TextElement, elementsMap);
 
     } else if (element.type === ShapeType.CONNECTOR) {
       connectorManager.drawConnector(ctx, element as ConnectorElement, elementsMap, roughRenderer, selectedIds.has(element.id));
@@ -141,6 +167,7 @@ export const renderCanvas = (
       } else {
         // Trigger fetch, will render on next frame once loaded
         getIconBitmap(iconEl);
+        assetsPending = true;
       }
     } else {
       renderShape(rc, element as unknown as ShapeElement);
@@ -150,6 +177,53 @@ export const renderCanvas = (
   });
 
   ctx.restore();
+  return assetsPending;
+};
+
+/**
+ * Draw a text element. A label bound to a shape is laid out against the shape's
+ * current box at draw time — nothing has to keep the two in sync when the
+ * container is moved or resized.
+ */
+const renderText = (
+  ctx: CanvasRenderingContext2D,
+  el: TextElement,
+  elementsMap: Map<string, WhiteboardElement>
+) => {
+  const container = el.containerId ? elementsMap.get(el.containerId) : undefined;
+  const { lines, width, height, lineHeight } = layoutText(el, container);
+  if (lines.length === 0) return;
+
+  const fontSize = el.fontSize || 18;
+  ctx.font = fontString(fontSize, el.fontFamily || FONT_FAMILIES[0].value);
+  ctx.fillStyle = el.color || el.style.stroke;
+  ctx.globalAlpha = el.style.opacity ?? 1;
+  ctx.textBaseline = 'top';
+
+  let originX = el.x;
+  let originY = el.y;
+  if (container) {
+    // Centred in the container, both axes.
+    const cx = Math.min(container.x, container.x + container.width) + Math.abs(container.width) / 2;
+    const cy = Math.min(container.y, container.y + container.height) + Math.abs(container.height) / 2;
+    originX = cx;
+    originY = cy - height / 2;
+  }
+
+  const align = container ? 'center' : (el.textAlign ?? 'left');
+
+  lines.forEach((line, i) => {
+    let x = originX;
+    if (align === 'center') {
+      x = container ? originX - measureLine(line, fontSize, el.fontFamily || FONT_FAMILIES[0].value) / 2
+                    : originX + (width - measureLine(line, fontSize, el.fontFamily || FONT_FAMILIES[0].value)) / 2;
+    } else if (align === 'right') {
+      x = originX + width - measureLine(line, fontSize, el.fontFamily || FONT_FAMILIES[0].value);
+    }
+    ctx.fillText(line, x, originY + i * lineHeight);
+  });
+
+  ctx.globalAlpha = 1;
 };
 
 const renderGrid = (

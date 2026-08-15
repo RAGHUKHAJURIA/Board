@@ -10,12 +10,13 @@ import {
   MessageSquare, LogIn, Settings, Sun, Moon, Monitor,
   ChevronRight, Triangle
 } from 'lucide-react';
-import { exportToPNG } from '@/lib/export/png';
+import { exportToJSON, pickAndParseScene } from '@/lib/export/json';
 
 export function MainMenu() {
   const [isOpen, setIsOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
-  
+  const setDialog = useUIStore(state => state.setDialog);
+
   const theme = useUIStore(state => state.theme);
   const setTheme = useUIStore(state => state.setTheme);
   const deleteElements = useCanvasStore(state => state.deleteElements);
@@ -78,15 +79,25 @@ export function MainMenu() {
     setIsOpen(false);
   };
 
+  const handleSave = () => {
+    exportToJSON(elements, canvasBackground);
+    setIsOpen(false);
+  };
+
+  const handleOpenFile = async () => {
+    setIsOpen(false);
+    const scene = await pickAndParseScene();
+    if (scene) useCanvasStore.getState().loadScene(scene.elements, scene.background);
+  };
+
   const menuSections = [
     {
       label: 'FILE',
       items: [
-        { icon: FolderOpen, label: 'Open', shortcut: 'Ctrl+O' },
-        { icon: Save, label: 'Save to...' },
+        { icon: FolderOpen, label: 'Open', shortcut: 'Ctrl+O', onClick: handleOpenFile },
+        { icon: Save, label: 'Save to...', shortcut: 'Ctrl+S', onClick: handleSave },
         { icon: ImageIcon, label: 'Export image...', shortcut: 'Ctrl+Shift+E', onClick: () => {
-          const grid = useUIStore.getState().grid;
-          exportToPNG({ elements: Object.values(elements), grid, background: canvasBackground, resolvedTheme });
+          setDialog('export');
           setIsOpen(false);
         }},
       ]
@@ -97,7 +108,7 @@ export function MainMenu() {
         { icon: Users, label: 'Live collaboration...' },
         { icon: Command, label: 'Command palette', shortcut: 'Ctrl+/' },
         { icon: Search, label: 'Find on canvas', shortcut: 'Ctrl+F' },
-        { icon: HelpCircle, label: 'Help', shortcut: '?' },
+        { icon: HelpCircle, label: 'Help', shortcut: '?', onClick: () => { setDialog('help'); setIsOpen(false); } },
         { icon: Trash2, label: 'Reset the canvas', onClick: handleResetCanvas, destructive: true },
       ]
     },

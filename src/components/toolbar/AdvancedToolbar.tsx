@@ -29,6 +29,7 @@ import {
   LayoutDashboard,
   X,
   Plus,
+  Highlighter,
 } from 'lucide-react';
 import { ShapeType } from '@/types';
 
@@ -207,7 +208,23 @@ function EraserPanel({
    Main Toolbar
 ═══════════════════════════════════════════════════════ */
 export function AdvancedToolbar() {
-  const { tool, setTool, undo, redo, canUndo, canRedo, selectedIds, elements, updateElement, isInteracting, eraserSettings, setEraserMode, setEraserSize } = useCanvasStore();
+  // One selector per value. Destructuring `useCanvasStore()` subscribes to the
+  // whole store, so the toolbar re-rendered on every single store write — every
+  // pointermove of a drag, and setIsInteracting() at pen-down, which is exactly
+  // the moment the first points of a stroke are arriving.
+  const tool = useCanvasStore((s) => s.tool);
+  const setTool = useCanvasStore((s) => s.setTool);
+  const undo = useCanvasStore((s) => s.undo);
+  const redo = useCanvasStore((s) => s.redo);
+  // Derived as booleans rather than calling canUndo()/canRedo() during render,
+  // so the buttons still update without subscribing to the history array.
+  const canUndo = useCanvasStore((s) => s.historyIndex > 0);
+  const canRedo = useCanvasStore((s) => s.historyIndex < s.history.length - 1);
+  const updateElement = useCanvasStore((s) => s.updateElement);
+  const isInteracting = useCanvasStore((s) => s.isInteracting);
+  const eraserSettings = useCanvasStore((s) => s.eraserSettings);
+  const setEraserMode = useCanvasStore((s) => s.setEraserMode);
+  const setEraserSize = useCanvasStore((s) => s.setEraserSize);
   const currentStyle = useUIStore((state) => state.currentStyle);
   const penType = currentStyle.penType || 'pen';
   const updateCurrentStyle = useUIStore((state) => state.updateCurrentStyle);
@@ -232,12 +249,14 @@ export function AdvancedToolbar() {
 
   const handleColorChange = (c: string) => {
     updateCurrentStyle({ stroke: c });
-    if (selectedIds.size > 0) {
-      selectedIds.forEach((id) => {
-        const el = elements[id];
-        if (el) updateElement(id, { style: { ...el.style, stroke: c } });
-      });
-    }
+    // Read on click instead of subscribing: the toolbar has no other use for
+    // the element map, and subscribing to it re-rendered the whole toolbar on
+    // every change to any element on the board.
+    const { selectedIds, elements } = useCanvasStore.getState();
+    selectedIds.forEach((id) => {
+      const el = elements[id];
+      if (el) updateElement(id, { style: { ...el.style, stroke: c } });
+    });
   };
 
   const tools = [
@@ -259,6 +278,7 @@ export function AdvancedToolbar() {
     { id: ShapeType.IMAGE, icon: ImageIcon, label: 'Image' },
     { id: 'icon-picker', icon: Plus, label: 'Icons' },
     { id: 'eraser', icon: Eraser, label: 'Eraser (E)' },
+    { id: 'laser', icon: Highlighter, label: 'Laser pointer (K)' },
   ];
 
   const isVertical = orientation === 'vertical';
@@ -384,18 +404,18 @@ export function AdvancedToolbar() {
 
             {/* Undo/Redo */}
             <button
-              onClick={() => canUndo() && undo()}
-              className={`p-1.5 rounded transition-colors shrink-0 flex justify-center w-full ${canUndo() ? 'text-zinc-600 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800' : 'text-zinc-300 dark:text-zinc-700 cursor-not-allowed'}`}
+              onClick={() => canUndo && undo()}
+              className={`p-1.5 rounded transition-colors shrink-0 flex justify-center w-full ${canUndo ? 'text-zinc-600 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800' : 'text-zinc-300 dark:text-zinc-700 cursor-not-allowed'}`}
               title="Undo (Ctrl+Z)"
-              disabled={!canUndo()}
+              disabled={!canUndo}
             >
               <Undo2 size={18} />
             </button>
             <button
-              onClick={() => canRedo() && redo()}
-              className={`p-1.5 rounded transition-colors shrink-0 flex justify-center w-full ${canRedo() ? 'text-zinc-600 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800' : 'text-zinc-300 dark:text-zinc-700 cursor-not-allowed'}`}
+              onClick={() => canRedo && redo()}
+              className={`p-1.5 rounded transition-colors shrink-0 flex justify-center w-full ${canRedo ? 'text-zinc-600 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800' : 'text-zinc-300 dark:text-zinc-700 cursor-not-allowed'}`}
               title="Redo (Ctrl+Y)"
-              disabled={!canRedo()}
+              disabled={!canRedo}
             >
               <Redo2 size={18} />
             </button>
@@ -466,18 +486,18 @@ export function AdvancedToolbar() {
 
           {/* Undo/Redo */}
           <button
-            onClick={() => canUndo() && undo()}
-            className={`p-1.5 rounded transition-colors shrink-0 ${canUndo() ? 'text-zinc-600 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800' : 'text-zinc-300 dark:text-zinc-700 cursor-not-allowed'}`}
+            onClick={() => canUndo && undo()}
+            className={`p-1.5 rounded transition-colors shrink-0 ${canUndo ? 'text-zinc-600 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800' : 'text-zinc-300 dark:text-zinc-700 cursor-not-allowed'}`}
             title="Undo (Ctrl+Z)"
-            disabled={!canUndo()}
+            disabled={!canUndo}
           >
             <Undo2 size={16} />
           </button>
           <button
-            onClick={() => canRedo() && redo()}
-            className={`p-1.5 rounded transition-colors shrink-0 ${canRedo() ? 'text-zinc-600 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800' : 'text-zinc-300 dark:text-zinc-700 cursor-not-allowed'}`}
+            onClick={() => canRedo && redo()}
+            className={`p-1.5 rounded transition-colors shrink-0 ${canRedo ? 'text-zinc-600 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800' : 'text-zinc-300 dark:text-zinc-700 cursor-not-allowed'}`}
             title="Redo (Ctrl+Y)"
-            disabled={!canRedo()}
+            disabled={!canRedo}
           >
             <Redo2 size={16} />
           </button>

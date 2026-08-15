@@ -1,8 +1,19 @@
-import { RoughCanvas } from 'roughjs/bin/canvas';
 import { ShapeElement, ShapeType } from '@/types';
 
+/**
+ * The slice of roughjs's API these shapes use. RoughCanvas satisfies it as-is,
+ * and the SVG exporter passes a wrapper that appends the returned nodes — so
+ * the geometry of every shape stays defined exactly once.
+ */
+export interface RoughLike {
+  rectangle(x: number, y: number, w: number, h: number, options?: object): unknown;
+  ellipse(cx: number, cy: number, w: number, h: number, options?: object): unknown;
+  polygon(points: [number, number][], options?: object): unknown;
+  line(x1: number, y1: number, x2: number, y2: number, options?: object): unknown;
+}
+
 export const renderShape = (
-  rc: RoughCanvas,
+  rc: RoughLike,
   element: ShapeElement
 ) => {
   const { x, y, width, height, type, style, seed } = element;

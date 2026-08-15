@@ -3,12 +3,13 @@
 import React, { useEffect, useRef, useState, useCallback, useMemo } from 'react';
 import { useCanvasStore } from '@/store/canvas-store';
 import { useUIStore } from '@/store/ui-store';
-import { renderCanvas } from '@/lib/canvas/renderer';
+import { renderCanvas, type ErasePreview } from '@/lib/canvas/renderer';
 import { renderFreehand } from '@/lib/canvas/freehand';
 import { Point, ShapeType, WhiteboardElement, FreehandElement, ShapeElement, TextElement, ConnectorElement, ImageElement } from '@/types';
 import { isPointInBox } from '@/lib/utils/geometry';
 import { SelectionBox } from './SelectionBox';
 import { IconPicker } from './IconPicker';
+import { ContextMenu, type ContextMenuState } from './ContextMenu';
 import { ResizeHandle } from '@/lib/utils/transforms';
 import { resizeElement as calcResizedBounds } from '@/lib/utils/transforms';
 import { v4 as uuidv4 } from 'uuid';
@@ -25,7 +26,11 @@ import { gatePointerEvent } from '@/lib/input/input-gate';
 import { isPenPointer } from '@/lib/input/pen-detect';
 import { getDeviceCapabilities } from '@/lib/input/device-detection';
 import { createActiveStroke, clearStrokeTimeout, type ActiveStroke, type CompletionReason } from '@/lib/canvas/stroke-state';
+import { LaserTrail } from '@/lib/canvas/laser';
+import { layoutText, FONT_FAMILIES } from '@/lib/canvas/text';
 import { PenCursor } from './PenCursor';
+
+const NO_ERASE_PREVIEW: ErasePreview = { faded: new Set(), hidden: new Set() };
 
 type InteractionMode =
   | 'idle'
@@ -56,17 +61,32 @@ export function Canvas() {
   const tool = useCanvasStore(state => state.tool);
   const canvasBackground = useCanvasStore(state => state.canvasBackground);
   const inputMode = useCanvasStore(state => state.inputMode);
-  const { addElement, updateElement, deleteElements, selectElements, clearSelection, updateViewport, saveSnapshot, setTool, setIsInteracting, batchErase } = useCanvasStore();
+  // Per-action selectors rather than a whole-store destructure, which would
+  // re-render the canvas on every write including ones it doesn't care about.
+  const addElement = useCanvasStore(s => s.addElement);
+  const updateElement = useCanvasStore(s => s.updateElement);
+  const deleteElements = useCanvasStore(s => s.deleteElements);
+  const selectElements = useCanvasStore(s => s.selectElements);
+  const clearSelection = useCanvasStore(s => s.clearSelection);
+  const updateViewport = useCanvasStore(s => s.updateViewport);
+  const saveSnapshot = useCanvasStore(s => s.saveSnapshot);
+  const setTool = useCanvasStore(s => s.setTool);
+  const setIsInteracting = useCanvasStore(s => s.setIsInteracting);
 
   const currentStyle = useUIStore(state => state.currentStyle);
   const grid = useUIStore(state => state.grid);
   const theme = useUIStore(state => state.theme);
 
+  // Only needed as a repaint trigger now: the renderer takes an explicit
+  // background colour and no longer resolves the theme itself.
   const resolvedTheme: 'light' | 'dark' = theme === 'system'
     ? (typeof window !== 'undefined' && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')
     : theme;
   const eraserSettings = useCanvasStore(state => state.eraserSettings);
   const setInputState = useCanvasStore(state => state.setInputState);
+  // Subscribed (not read via getState) so the connector-binding highlight
+  // actually triggers a repaint now that rendering is dirty-flag driven.
+  const hoveredBindTarget = useCanvasStore(state => state.hoveredBindTarget);
 
   // Tablet / iPad pointers
   const rejectedPointers = useRef(new Set<number>());
@@ -77,6 +97,7 @@ export function Canvas() {
   const setMode = useCallback((m: InteractionMode) => { modeRef.current = m; setModeState(m); }, []);
 
   const [selectionBox, setSelectionBox] = useState<{ start: Point; end: Point } | null>(null);
+  const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
 
   // Text editing
   const [textEditingId, setTextEditingId] = useState<string | null>(null);
@@ -115,6 +136,26 @@ export function Canvas() {
   const overlayHandoffRef = useRef<string | null>(null);
   // Minimum distance between points (world units) to prevent jitter
   const MIN_POINT_DISTANCE = 0.5;
+
+  // ── Eraser gesture state ────────────────────────────────────────────────
+  // Nothing reaches the store while the eraser is down. The manager only marks
+  // what has been touched, the board ghosts those elements through
+  // erasePreviewRef, and the whole gesture commits once on pointer-up as a
+  // single undo step. The previous version deleted (and in partial mode
+  // re-created, with fresh ids) elements on every pointermove, which meant a
+  // store write plus a full re-render per sample — the reason erasing stuttered
+  // on tablets and phones.
+  const erasePointerRef = useRef<number | null>(null);
+  const erasePreviewRef = useRef<ErasePreview>(NO_ERASE_PREVIEW);
+  const eraseOverlayDirtyRef = useRef(false);
+
+  // Laser pointer: overlay-only, never enters the document.
+  const laserRef = useRef(new LaserTrail());
+  const laserPointerRef = useRef<number | null>(null);
+
+  // Space held = temporary hand tool, as in Excalidraw. A ref because the
+  // native drawing listeners need to see it without re-registering.
+  const spaceDownRef = useRef(false);
 
   // Initialize EraserManager
   useEffect(() => {
@@ -193,6 +234,53 @@ export function Canvas() {
     }
   }, [clearOverlay, setIsInteracting, setMode]);
 
+  // ── Eraser preview plumbing ─────────────────────────────────────────────
+  // Shared by the native eraser listeners and the React gesture path.
+  const syncErasePreview = useCallback(() => {
+    const mgr = eraserRef.current;
+    if (!mgr) return;
+    erasePreviewRef.current = { faded: mgr.getMarkedIds(), hidden: mgr.getHiddenIds() };
+    dirtyRef.current = true;
+    eraseOverlayDirtyRef.current = true;
+  }, []);
+
+  const clearErasePreview = useCallback(() => {
+    erasePreviewRef.current = NO_ERASE_PREVIEW;
+    dirtyRef.current = true;
+    eraseOverlayDirtyRef.current = false;
+    clearOverlay();
+  }, [clearOverlay]);
+
+  /** Apply the whole wipe as a single undo step. */
+  const commitErase = useCallback(() => {
+    const mgr = eraserRef.current;
+    erasePointerRef.current = null;
+    if (mgr?.hasChanges()) {
+      const { toDelete, toAdd } = mgr.getResult();
+      const store = useCanvasStore.getState();
+      store.saveSnapshot();
+      store.batchErase(toDelete, toAdd);
+    }
+    mgr?.endErase();
+    clearErasePreview();
+    if (modeRef.current === 'erasing') {
+      setMode('idle');
+      setIsInteracting(false);
+    }
+  }, [clearErasePreview, setIsInteracting, setMode]);
+
+  /** Drop the wipe without applying it (a second finger took the gesture). */
+  const cancelErase = useCallback(() => {
+    if (erasePointerRef.current === null) return;
+    erasePointerRef.current = null;
+    eraserRef.current?.endErase();
+    clearErasePreview();
+    if (modeRef.current === 'erasing') {
+      setMode('idle');
+      setIsInteracting(false);
+    }
+  }, [clearErasePreview, setIsInteracting, setMode]);
+
   // Throw the in-progress stroke away (two-finger gesture took over, etc.)
   const abortActiveStroke = useCallback(() => {
     const stroke = activeStrokeRef.current;
@@ -217,6 +305,9 @@ export function Canvas() {
     const canvas = canvasRef.current; // TS narrows: HTMLCanvasElement
 
     function handleNativeFreehandDown(e: PointerEvent) {
+      // Space held is a temporary hand tool — pan, don't draw.
+      if (spaceDownRef.current) return;
+
       const store = useCanvasStore.getState();
       const currentTool = store.tool;
 
@@ -449,6 +540,100 @@ export function Canvas() {
       }
     }
 
+    // ── Eraser ────────────────────────────────────────────────────────────
+    // On the same native path as freehand, and for the same reasons: React's
+    // synthetic events don't expose getCoalescedEvents(), so a fast wipe was
+    // being sampled once per frame and skipped straight over strokes between
+    // two samples.
+    const worldFromEvent = (e: PointerEvent): Point => {
+      const vp = useCanvasStore.getState().viewport;
+      const rect = canvas.getBoundingClientRect();
+      return {
+        x: (e.clientX - rect.left - vp.x) / vp.zoom,
+        y: (e.clientY - rect.top - vp.y) / vp.zoom,
+      };
+    };
+
+    function handleNativeEraserDown(e: PointerEvent) {
+      if (spaceDownRef.current) return;
+      const store = useCanvasStore.getState();
+      if (store.tool !== 'eraser' || e.button === 2) return;
+      // A second contact is a pinch or a pan, never a wipe.
+      if (!e.isPrimary) return;
+
+      const im = store.inputMode;
+      if (gatePointerEvent(e, im.mode, im.isTouchDevice) !== 'allow') return;
+
+      e.preventDefault();
+      try { canvas.setPointerCapture(e.pointerId); } catch {}
+
+      // The spatial index is rebuilt on a 200ms debounce, so anything drawn in
+      // the last moment would be invisible to the eraser without this.
+      spatialIndexRef.current.rebuild(store.elements);
+
+      const mgr = eraserRef.current;
+      if (!mgr) return;
+
+      erasePointerRef.current = e.pointerId;
+      const world = worldFromEvent(e);
+      mgr.startErase(world);
+      mgr.extend([world], store.elements, store.eraserSettings, store.viewport.zoom);
+      syncErasePreview();
+      setMode('erasing');
+      setIsInteracting(true);
+    }
+
+    function handleNativeEraserMove(e: PointerEvent) {
+      if (erasePointerRef.current !== e.pointerId) return;
+      const store = useCanvasStore.getState();
+      const im = store.inputMode;
+      if (gatePointerEvent(e, im.mode, im.isTouchDevice) !== 'allow') return;
+
+      e.preventDefault();
+      const mgr = eraserRef.current;
+      if (!mgr) return;
+
+      const samples = extractRawCoalescedPoints(e, canvas, store.viewport)
+        .map(([x, y]) => ({ x, y }));
+      if (mgr.extend(samples, store.elements, store.eraserSettings, store.viewport.zoom)) {
+        syncErasePreview();
+      }
+    }
+
+    function handleNativeEraserUp(e: PointerEvent) {
+      if (erasePointerRef.current !== e.pointerId) return;
+      e.preventDefault();
+      commitErase();
+    }
+
+    // ── Laser pointer ─────────────────────────────────────────────────────
+    function handleNativeLaserDown(e: PointerEvent) {
+      if (spaceDownRef.current) return;
+      if (useCanvasStore.getState().tool !== 'laser' || e.button === 2) return;
+      if (!e.isPrimary) return;
+      e.preventDefault();
+      try { canvas.setPointerCapture(e.pointerId); } catch {}
+      laserPointerRef.current = e.pointerId;
+      laserRef.current.clear();
+      const w = worldFromEvent(e);
+      laserRef.current.add(w.x, w.y);
+    }
+
+    function handleNativeLaserMove(e: PointerEvent) {
+      if (laserPointerRef.current !== e.pointerId) return;
+      e.preventDefault();
+      const vp = useCanvasStore.getState().viewport;
+      for (const [x, y] of extractRawCoalescedPoints(e, canvas, vp)) {
+        laserRef.current.add(x, y);
+      }
+    }
+
+    function handleNativeLaserUp(e: PointerEvent) {
+      if (laserPointerRef.current !== e.pointerId) return;
+      laserPointerRef.current = null;
+      // The tail is left to fade on its own rather than snapping away.
+    }
+
     // Use { passive: false } so we can call preventDefault() to block Scribble
     canvas.addEventListener('pointerdown', handleNativeFreehandDown, { passive: false });
     canvas.addEventListener('pointermove', handleNativeFreehandMove, { passive: false });
@@ -456,31 +641,48 @@ export function Canvas() {
     canvas.addEventListener('pointercancel', handleNativeFreehandCancel, { passive: false });
     canvas.addEventListener('lostpointercapture', handleLostPointerCapture, { passive: true });
 
+    canvas.addEventListener('pointerdown', handleNativeLaserDown, { passive: false });
+    canvas.addEventListener('pointermove', handleNativeLaserMove, { passive: false });
+    canvas.addEventListener('pointerup', handleNativeLaserUp, { passive: true });
+    canvas.addEventListener('pointercancel', handleNativeLaserUp, { passive: true });
+
+    canvas.addEventListener('pointerdown', handleNativeEraserDown, { passive: false });
+    canvas.addEventListener('pointermove', handleNativeEraserMove, { passive: false });
+    canvas.addEventListener('pointerup', handleNativeEraserUp, { passive: false });
+    // A cancelled or stolen pointer must still commit — losing the gesture
+    // would silently throw away everything the user just wiped.
+    canvas.addEventListener('pointercancel', handleNativeEraserUp, { passive: false });
+    canvas.addEventListener('lostpointercapture', handleNativeEraserUp, { passive: true });
+
     return () => {
       canvas.removeEventListener('pointerdown', handleNativeFreehandDown);
       canvas.removeEventListener('pointermove', handleNativeFreehandMove);
       canvas.removeEventListener('pointerup', handleNativeFreehandUp);
       canvas.removeEventListener('pointercancel', handleNativeFreehandCancel);
       canvas.removeEventListener('lostpointercapture', handleLostPointerCapture);
+      canvas.removeEventListener('pointerdown', handleNativeEraserDown);
+      canvas.removeEventListener('pointermove', handleNativeEraserMove);
+      canvas.removeEventListener('pointerup', handleNativeEraserUp);
+      canvas.removeEventListener('pointercancel', handleNativeEraserUp);
+      canvas.removeEventListener('lostpointercapture', handleNativeEraserUp);
+      canvas.removeEventListener('pointerdown', handleNativeLaserDown);
+      canvas.removeEventListener('pointermove', handleNativeLaserMove);
+      canvas.removeEventListener('pointerup', handleNativeLaserUp);
+      canvas.removeEventListener('pointercancel', handleNativeLaserUp);
     };
-  }, [finalizeActiveStroke, abortActiveStroke, setIsInteracting, setMode]);
+  }, [finalizeActiveStroke, abortActiveStroke, setIsInteracting, setMode, syncErasePreview, commitErase]);
 
   // ── Live-stroke overlay loop ────────────────────────────────────────────
   // Redraws only the stroke currently under the pen, and only when new points
   // arrived. Idle cost is one no-op rAF callback.
   useEffect(() => {
     let frame = 0;
-    const tick = () => {
-      frame = requestAnimationFrame(tick);
-      if (!overlayDirtyRef.current) return;
-      overlayDirtyRef.current = false;
 
-      const stroke = activeStrokeRef.current;
-      const shell = liveStrokeElRef.current;
+    /** Reset the overlay to the current viewport transform and clear it. */
+    const prepareOverlay = () => {
       const ov = overlayRef.current;
       const ctx = ov?.getContext('2d');
-      if (!ov || !ctx || !stroke || !shell) return;
-
+      if (!ov || !ctx) return null;
       const vp = useCanvasStore.getState().viewport;
       const dpr = window.devicePixelRatio || 1;
       ctx.setTransform(1, 0, 0, 1, 0, 0);
@@ -488,6 +690,46 @@ export function Canvas() {
       ctx.scale(dpr, dpr);
       ctx.translate(vp.x, vp.y);
       ctx.scale(vp.zoom, vp.zoom);
+      return ctx;
+    };
+
+    const tick = () => {
+      frame = requestAnimationFrame(tick);
+
+      // The laser fades on a timer rather than on input, so while it is alive
+      // the overlay repaints every frame — the one place a continuous loop is
+      // actually earning its keep.
+      const laser = laserRef.current;
+      if (laser.isAlive()) {
+        const stillAlive = laser.prune();
+        // prepareOverlay() clears first, so the frame where the last point
+        // expires is also the frame that wipes the trail off the screen.
+        const ctx = prepareOverlay();
+        if (ctx && stillAlive) laser.draw(ctx, useCanvasStore.getState().viewport.zoom);
+        return;
+      }
+
+      // Partial erase in progress: the board hides the originals and the
+      // surviving fragments are previewed here, so the stroke visibly parts
+      // under the eraser without a single store write.
+      if (eraseOverlayDirtyRef.current) {
+        eraseOverlayDirtyRef.current = false;
+        const ctx = prepareOverlay();
+        const survivors = eraserRef.current?.getSurvivors();
+        if (ctx && survivors) {
+          for (const piece of survivors) renderFreehand(ctx, piece);
+        }
+        return;
+      }
+
+      if (!overlayDirtyRef.current) return;
+      overlayDirtyRef.current = false;
+
+      const stroke = activeStrokeRef.current;
+      const shell = liveStrokeElRef.current;
+      if (!stroke || !shell) return;
+      const ctx = prepareOverlay();
+      if (!ctx) return;
       // Same renderer as the committed stroke, so nothing shifts on commit.
       renderFreehand(ctx, { ...shell, points: stroke.points } as FreehandElement);
     };
@@ -532,6 +774,40 @@ export function Canvas() {
       document.removeEventListener('visibilitychange', handleVisibilityChange);
     };
   }, [finalizeActiveStroke]);
+
+  // ── Space to pan ────────────────────────────────────────────────────────
+  // Held space is a temporary hand tool. Tracked separately from the shortcut
+  // handler below because it has to survive keyrepeat and window blur.
+  useEffect(() => {
+    const onDown = (e: KeyboardEvent) => {
+      const tag = (e.target as HTMLElement)?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+      if (e.code !== 'Space' || spaceDownRef.current) return;
+      spaceDownRef.current = true;
+      // Stop the page scrolling under us while space is held.
+      e.preventDefault();
+      if (containerRef.current) containerRef.current.style.cursor = 'grab';
+    };
+    const onUp = (e: KeyboardEvent) => {
+      if (e.code !== 'Space') return;
+      spaceDownRef.current = false;
+      if (containerRef.current) containerRef.current.style.cursor = '';
+    };
+    // Alt-tabbing away with space held would otherwise leave it stuck down.
+    const onBlur = () => {
+      spaceDownRef.current = false;
+      if (containerRef.current) containerRef.current.style.cursor = '';
+    };
+
+    window.addEventListener('keydown', onDown);
+    window.addEventListener('keyup', onUp);
+    window.addEventListener('blur', onBlur);
+    return () => {
+      window.removeEventListener('keydown', onDown);
+      window.removeEventListener('keyup', onUp);
+      window.removeEventListener('blur', onBlur);
+    };
+  }, []);
 
   // Keyboard shortcuts
   useEffect(() => {
@@ -657,21 +933,38 @@ export function Canvas() {
     return () => window.removeEventListener('resize', updateCanvasSize);
   }, [updateCanvasSize]);
 
-  // Main render loop
+  // ── Main render loop ────────────────────────────────────────────────────
+  // Repaints only when something changed. This loop used to call renderCanvas()
+  // on every animation frame forever: on a completely idle board it still
+  // re-sorted every element and re-tesselated every freehand stroke through
+  // perfect-freehand 60×/second. That permanent main-thread load is why the pen
+  // and the eraser felt laggy on tablets and phones — the work was being done
+  // whether or not anything had actually moved.
+  const dirtyRef = useRef(true);
+  // Any React render of this component means a subscribed value moved
+  // (elements, viewport, selection, grid, theme, …), so the board is stale.
+  useEffect(() => { dirtyRef.current = true; });
+
   useEffect(() => {
     if (!canvasRef.current) return;
 
     let frameId: number;
     const render = () => {
-      renderCanvas(
+      frameId = requestAnimationFrame(render);
+      if (!dirtyRef.current) return;
+      dirtyRef.current = false;
+
+      const assetsPending = renderCanvas(
         canvasRef.current!,
         Object.values(elements),
         selectedIds,
         viewport,
         grid,
         canvasBackground,
-        resolvedTheme
+        erasePreviewRef.current
       );
+      // An image or icon bitmap is still decoding — try again next frame.
+      if (assetsPending) dirtyRef.current = true;
 
       // The just-finished stroke is now on the main canvas, so the overlay copy
       // can go. Doing this any earlier blinks the stroke for a frame.
@@ -716,7 +1009,6 @@ export function Canvas() {
       }
 
       // Draw binding highlight
-      const hoveredBindTarget = useCanvasStore.getState().hoveredBindTarget;
       if (hoveredBindTarget) {
         const el = elements[hoveredBindTarget];
         if (el) {
@@ -746,14 +1038,11 @@ export function Canvas() {
           }
         }
       }
-
-
-      frameId = requestAnimationFrame(render);
     };
 
     render();
     return () => cancelAnimationFrame(frameId);
-  }, [elements, selectedIds, viewport, grid, selectionBox, canvasBackground, resolvedTheme, clearOverlay]);
+  }, [elements, selectedIds, viewport, grid, selectionBox, canvasBackground, resolvedTheme, clearOverlay, hoveredBindTarget]);
 
   // Screen → world
   const screenToWorld = (sx: number, sy: number): Point => ({
@@ -769,33 +1058,52 @@ export function Canvas() {
 
 
   const handlePointerDown = (e: React.PointerEvent) => {
-    // If the active tool is freehand drawing, let the native listener handle it.
-    // We only allow middle click or hand tool panning.
-    if (tool === ShapeType.FREEHAND && e.button !== 1) {
-      return;
-    }
-
-    const decision = gatePointerEvent(e.nativeEvent, inputMode.mode, inputMode.isTouchDevice);
-    if (decision === 'block-touch' || decision === 'block-pen') return;
+    const nativeEvent = e.nativeEvent;
 
     if (e.button === 2) return; // ignore right-click
 
-    // Tablet Palm Rejection and Gestures
-    const nativeEvent = e.nativeEvent;
-    const result = gestureHandler.onPointerDown(nativeEvent);
+    // ── Touch gestures come first ──────────────────────────────────────────
+    // Before the pen-mode gate, and before the freehand/eraser hand-off below:
+    // two fingers are always pan/zoom and never a stroke. Running this after
+    // the gate meant pen mode on a tablet rejected the contacts and left no way
+    // to scroll the board; running it after the hand-off meant selecting the
+    // pen or eraser tool killed pinch-zoom entirely.
+    if (nativeEvent.pointerType === 'touch') {
+      const result = gestureHandler.onPointerDown(nativeEvent);
 
-    if (result === 'reject') {
-      rejectedPointers.current.add(e.pointerId);
+      if (result === 'reject') {
+        rejectedPointers.current.add(e.pointerId);
+        return;
+      }
+
+      if (result === 'gesture') {
+        // Second finger down — whatever the first one was doing is not a stroke.
+        abortActiveStroke();
+        cancelErase();
+        if (modeRef.current === 'drawing') {
+          const lastEl = elements[currentElementRef.current?.id || ''];
+          if (lastEl) deleteElements([lastEl.id]);
+        }
+        setMode('panning');
+        return;
+      }
+    }
+
+    const decision = gatePointerEvent(nativeEvent, inputMode.mode, inputMode.isTouchDevice);
+    if (decision === 'block-touch' || decision === 'block-pen') return;
+
+    // Space held, middle button, or the hand tool: pan, whatever tool is active.
+    if (spaceDownRef.current || e.button === 1 || tool === 'hand') {
+      (e.target as Element).setPointerCapture(e.pointerId);
+      lastPointerPos.current = { x: e.clientX, y: e.clientY };
+      setMode('panning');
+      setIsInteracting(true);
       return;
     }
 
-    if (result === 'gesture') {
-      // Two-finger gesture starting — cancel any active drawing stroke
-      if (modeRef.current === 'drawing') {
-        const lastEl = elements[currentElementRef.current?.id || ''];
-        if (lastEl) deleteElements([lastEl.id]);
-      }
-      setMode('panning');
+    // Freehand, eraser and laser run on the native listeners above (they need
+    // the coalesced sub-frame samples React's synthetic events throw away).
+    if (tool === ShapeType.FREEHAND || tool === 'eraser' || tool === 'laser') {
       return;
     }
 
@@ -816,12 +1124,6 @@ export function Canvas() {
     const world = screenToWorld(e.clientX, e.clientY);
     lastPointerPos.current = screen;
     lastPointerWorldPos.current = world;
-
-    // Middle button or hand tool → pan
-    if (e.button === 1 || tool === 'hand') {
-      setMode('panning');
-      return;
-    }
 
     // Image tool -> trigger file upload
     if (tool === ShapeType.IMAGE) {
@@ -874,34 +1176,6 @@ export function Canvas() {
       return;
     }
 
-    // Eraser tool
-    if (tool === 'eraser') {
-      saveSnapshot();
-      
-      // CRITICAL: Rebuild spatial index synchronously right now so all
-      // elements drawn since last debounce tick are included.
-      spatialIndexRef.current.rebuild(useCanvasStore.getState().elements);
-      
-      eraserRef.current?.startErase(world);
-      
-      // Perform initial erase at the click point
-      if (eraserRef.current) {
-        const { toDelete, toAdd } = eraserRef.current.erase(
-          world,
-          useCanvasStore.getState().elements,
-          eraserSettings,
-          viewport.zoom
-        );
-        
-        if (toDelete.length > 0 || toAdd.length > 0) {
-          batchErase(toDelete, toAdd);
-        }
-      }
-      
-      setMode('erasing');
-      return;
-    }
-
     // ─── UNIVERSAL CLICK-TO-SELECT ───────────────────────────────────────
     const isActiveDraw = modeRef.current === 'drawing' || modeRef.current === 'connector-draw';
 
@@ -942,10 +1216,30 @@ export function Canvas() {
           selectElements([hit.elementId]);
         }
 
-        // Setup drag start positions
+        // Alt+drag leaves the original behind and drags a copy, as in
+        // Excalidraw. The copy is pasted centred on the selection it came from,
+        // so it starts exactly on top of the original instead of offset.
+        if (e.altKey && tool === 'select') {
+          const store = useCanvasStore.getState();
+          const sel = Array.from(store.selectedIds)
+            .map(id => store.elements[id])
+            .filter(Boolean) as WhiteboardElement[];
+          if (sel.length > 0) {
+            const minX = Math.min(...sel.map(el => Math.min(el.x, el.x + el.width)));
+            const maxX = Math.max(...sel.map(el => Math.max(el.x, el.x + el.width)));
+            const minY = Math.min(...sel.map(el => Math.min(el.y, el.y + el.height)));
+            const maxY = Math.max(...sel.map(el => Math.max(el.y, el.y + el.height)));
+            store.copy();
+            store.paste({ x: (minX + maxX) / 2, y: (minY + maxY) / 2 });
+          }
+        }
+
+        // Setup drag start positions (re-read: an Alt+drag just replaced the
+        // selection with the freshly pasted copies).
         dragStartElementPositions.current = {};
+        const liveElements = useCanvasStore.getState().elements;
         useCanvasStore.getState().selectedIds.forEach(id => {
-          const el = elements[id];
+          const el = liveElements[id];
           if (el) dragStartElementPositions.current[id] = { x: el.x, y: el.y };
         });
 
@@ -973,13 +1267,6 @@ export function Canvas() {
       }
     }
     // ─── END UNIVERSAL CLICK-TO-SELECT ───────────────────────────────────
-
-    // Freehand drawing — handled by native event listeners (see useEffect above)
-    // Native listeners bypass React's synthetic event system to get coalesced
-    // points and reliable pen-up on iPad. Skip here to avoid double-processing.
-    if (tool === ShapeType.FREEHAND) {
-      return;
-    }
 
     // Connector drawing
     if (tool === ShapeType.CONNECTOR || tool === ShapeType.ARROW) {
@@ -1038,20 +1325,13 @@ export function Canvas() {
   };
 
   const handlePointerMove = (e: React.PointerEvent) => {
-    // If the active tool is freehand drawing and we are not in panning mode, let the native listener handle it.
-    if (tool === ShapeType.FREEHAND && modeRef.current !== 'panning') {
-      return;
-    }
-
-    const decision = gatePointerEvent(e.nativeEvent, inputMode.mode, inputMode.isTouchDevice);
-    if (decision === 'block-touch' || decision === 'block-pen') return;
-
     const nativeEvent = e.nativeEvent;
 
     // Skip rejected (palm) pointers
     if (rejectedPointers.current.has(e.pointerId)) return;
 
-    // Handle two-finger gestures
+    // Two-finger gestures, evaluated before the pen-mode gate for the same
+    // reason as in pointerdown: pinch/pan must survive palm rejection.
     const wasGesture = gestureHandler.onPointerMove(
       nativeEvent,
       (scale, cx, cy) => {
@@ -1070,6 +1350,14 @@ export function Canvas() {
     );
 
     if (wasGesture) return; // Don't process drawing/panning during gesture
+
+    // Freehand and eraser moves belong to the native listeners.
+    if ((tool === ShapeType.FREEHAND || tool === 'eraser' || tool === 'laser') && modeRef.current !== 'panning') {
+      return;
+    }
+
+    const decision = gatePointerEvent(nativeEvent, inputMode.mode, inputMode.isTouchDevice);
+    if (decision === 'block-touch' || decision === 'block-pen') return;
 
     const screen: Point = { x: e.clientX, y: e.clientY };
     const world = screenToWorld(e.clientX, e.clientY);
@@ -1335,22 +1623,8 @@ export function Canvas() {
         break;
       }
 
-      case 'erasing': {
-        if (eraserRef.current) {
-          const { toDelete, toAdd } = eraserRef.current.erase(
-            world,
-            useCanvasStore.getState().elements,
-            eraserSettings,
-            viewport.zoom
-          );
-          
-          if (toDelete.length > 0 || toAdd.length > 0) {
-            // Apply immediately — spatial index is already updated inside EraserManager
-            batchErase(toDelete, toAdd);
-          }
-        }
-        break;
-      }
+      // 'erasing' is driven entirely by the native listeners above, which get
+      // the coalesced sub-frame samples React's synthetic events discard.
 
       default:
         break;
@@ -1366,7 +1640,14 @@ export function Canvas() {
     rejectedPointers.current.delete(e.pointerId);
     gestureHandler.onPointerUp(e.nativeEvent);
 
-    if (tool === ShapeType.FREEHAND && modeRef.current !== 'panning') {
+    // A pinch that was panning ends here whatever the active tool is.
+    if (modeRef.current === 'panning' && e.nativeEvent.pointerType === 'touch') {
+      setMode('idle');
+      setIsInteracting(false);
+      return;
+    }
+
+    if ((tool === ShapeType.FREEHAND || tool === 'eraser' || tool === 'laser') && modeRef.current !== 'panning') {
       return;
     }
 
@@ -1463,10 +1744,6 @@ export function Canvas() {
       rotateElementIdRef.current = null;
     }
 
-    if (prevMode === 'erasing') {
-      eraserRef.current?.endErase();
-    }
-
     setMode('idle');
     setIsInteracting(false);
   };
@@ -1527,6 +1804,23 @@ export function Canvas() {
   }, [handleWheelNative]);
   // ─────────────────────────────────────────────────────────────────────────
 
+  const handleContextMenu = (e: React.MouseEvent) => {
+    e.preventDefault();
+    const world = screenToWorld(e.clientX, e.clientY);
+    const hit = hitTestPoint(world.x, world.y, elements, viewport);
+
+    // Right-clicking an unselected element selects it first, so the menu always
+    // acts on what you pointed at. Right-clicking inside an existing selection
+    // leaves that selection alone.
+    if (hit) {
+      if (!selectedIds.has(hit.elementId)) selectElements([hit.elementId]);
+    } else {
+      clearSelection();
+    }
+
+    setContextMenu({ x: e.clientX, y: e.clientY, elementId: hit?.elementId ?? null });
+  };
+
   const handleDoubleClick = (e: React.MouseEvent) => {
     e.preventDefault();
     if (tool === 'select') {
@@ -1544,15 +1838,74 @@ export function Canvas() {
          }
       }
 
-      const sortedEls = Object.values(elements).sort((a, b) => b.zIndex - a.zIndex);
-      for (const el of sortedEls) {
-        const box = { minX: el.x, minY: el.y, maxX: el.x + el.width, maxY: el.y + el.height };
-        if (isPointInBox(world, box) && el.type === ShapeType.TEXT) {
+      const hit = hitTestPoint(world.x, world.y, elements, viewport);
+      if (hit) {
+        const el = elements[hit.elementId]!;
+
+        if (el.type === ShapeType.TEXT) {
           selectElements([el.id]);
           openTextEditor(el as TextElement);
           return;
         }
+
+        // Double-clicking any other shape edits its label, creating one on
+        // first use — Excalidraw's bound-text behaviour.
+        if (el.type !== ShapeType.IMAGE && el.type !== ShapeType.ICON) {
+          const existing = Object.values(elements).find(
+            (e) => e.type === ShapeType.TEXT && (e as TextElement).containerId === el.id
+          ) as TextElement | undefined;
+
+          if (existing) {
+            openTextEditor(existing);
+            return;
+          }
+
+          const label: TextElement = {
+            id: uuidv4(),
+            type: ShapeType.TEXT,
+            x: el.x,
+            y: el.y,
+            width: Math.abs(el.width),
+            height: 0,
+            rotation: 0,
+            locked: false,
+            zIndex: el.zIndex + 0.5,
+            style: { ...currentStyle },
+            text: '',
+            fontSize: 18,
+            fontFamily: FONT_FAMILIES[0].value,
+            color: currentStyle.stroke,
+            textAlign: 'center',
+            containerId: el.id,
+          };
+          addElement(label);
+          openTextEditor(label);
+          return;
+        }
       }
+
+      // Empty space: double-click starts a new text element, as Excalidraw does.
+      const id = uuidv4();
+      const newText: TextElement = {
+        id,
+        type: ShapeType.TEXT,
+        x: world.x,
+        y: world.y,
+        width: 0,
+        height: 18 * 1.4,
+        rotation: 0,
+        locked: false,
+        zIndex: Date.now(),
+        style: { ...currentStyle },
+        text: '',
+        fontSize: 18,
+        fontFamily: FONT_FAMILIES[0].value,
+        color: currentStyle.stroke,
+        textAlign: 'left',
+      };
+      addElement(newText);
+      selectElements([id]);
+      openTextEditor(newText);
     }
   };
 
@@ -1564,12 +1917,23 @@ export function Canvas() {
     let screenX, screenY, screenW, screenH, fontSize, fontFamily, color, text;
 
     if (el.type === ShapeType.TEXT) {
-      screenX = el.x * viewport.zoom + viewport.x;
-      screenY = el.y * viewport.zoom + viewport.y;
-      screenW = Math.max(el.width * viewport.zoom, 100);
-      screenH = Math.max(el.height * viewport.zoom, 40);
+      // A bound label is edited over its container, where it is drawn.
+      const container = el.containerId ? elements[el.containerId] : undefined;
+      const box = container
+        ? {
+            x: Math.min(container.x, container.x + container.width),
+            y: Math.min(container.y, container.y + container.height),
+            w: Math.abs(container.width),
+            h: Math.abs(container.height),
+          }
+        : { x: el.x, y: el.y, w: el.width, h: el.height };
+
+      screenX = box.x * viewport.zoom + viewport.x;
+      screenY = box.y * viewport.zoom + viewport.y;
+      screenW = Math.max(box.w * viewport.zoom, 100);
+      screenH = Math.max(box.h * viewport.zoom, 40);
       fontSize = el.fontSize || 18;
-      fontFamily = el.fontFamily || 'Inter, sans-serif';
+      fontFamily = el.fontFamily || FONT_FAMILIES[0].value;
       color = el.color || el.style.stroke;
       text = el.text;
     } else if (el.type === ShapeType.CONNECTOR) {
@@ -1624,17 +1988,24 @@ export function Canvas() {
       setTextEditingId(null);
       return;
     }
-    
+
     if (el.type === ShapeType.CONNECTOR) {
       updateElement(textEditingId, { label: textValue });
       saveSnapshot();
+    } else if (textValue.trim() === '') {
+      deleteElements([textEditingId]);
     } else {
-      if (textValue.trim() === '') {
-        deleteElements([textEditingId]);
-      } else {
-        updateElement(textEditingId, { text: textValue, width: Math.max(200, textValue.length * 10), height: 40 });
-        saveSnapshot();
-      }
+      const textEl = el as TextElement;
+      const container = textEl.containerId ? elements[textEl.containerId] : undefined;
+      // Size from the actual glyphs. The old `text.length * 10` guess left the
+      // selection box and hit area disagreeing with what was drawn.
+      const { width, height } = layoutText({ ...textEl, text: textValue }, container);
+      updateElement(textEditingId, {
+        text: textValue,
+        width: container ? Math.abs(container.width) : width,
+        height,
+      });
+      saveSnapshot();
     }
     setTextEditingId(null);
     setMode('idle');
@@ -1706,6 +2077,7 @@ export function Canvas() {
   // Cursor
   const getCursor = () => {
     if (tool === 'hand' || mode === 'panning') return 'grabbing';
+    if (tool === 'laser') return 'crosshair';
     if (tool === 'eraser') return 'none'; // we draw a custom cursor
     if (tool === 'text') return 'text';
     if (mode === 'dragging') return 'move';
@@ -1759,6 +2131,7 @@ export function Canvas() {
       style={{ cursor: getCursor(), overflow: 'hidden' }}
       onPointerMove={handlePointerMove}
       onPointerUp={handlePointerUp}
+      onContextMenu={handleContextMenu}
       onDrop={handleDrop}
       onDragOver={(e) => e.preventDefault()}
       // Tells iPadOS this region is not a text input area — disables Scribble
@@ -1889,41 +2262,59 @@ export function Canvas() {
       )}
 
       {/* Custom eraser cursor */}
-      {tool === 'eraser' && (
-        <EraserCursor size={eraserSettings.size} zoom={viewport.zoom} />
+      {tool === 'eraser' && <EraserCursor size={eraserSettings.size} />}
+
+      {contextMenu && (
+        <ContextMenu
+          state={contextMenu}
+          onClose={() => setContextMenu(null)}
+          onPasteAt={(sx, sy) => useCanvasStore.getState().paste(screenToWorld(sx, sy))}
+        />
       )}
     </div>
   );
 }
 
 /* ─── Eraser Cursor Component ─────────────────────────────────────────────── */
-function EraserCursor({ size, zoom }: { size: number; zoom: number }) {
+// `size` is the eraser diameter in SCREEN pixels — the erase radius is
+// size/2/zoom in world units, so on screen it is always size/2 whatever the
+// zoom. The ring used to be drawn at size*zoom, so at any zoom other than 100%
+// it showed an area the eraser did not actually cover.
+function EraserCursor({ size }: { size: number }) {
   const ref = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     const el = ref.current;
     if (!el) return;
 
-    const handleMove = (e: MouseEvent) => {
-      const screenSize = size * zoom;
-      el.style.transform = `translate(${e.clientX - screenSize / 2}px, ${e.clientY - screenSize / 2}px)`;
+    // Pointer events, not mouse events: a tablet or phone never fires
+    // mousemove, so the ring was invisible on exactly the devices where the
+    // canvas cursor is set to 'none' and there is no other feedback at all.
+    const handleMove = (e: PointerEvent) => {
+      el.style.transform = `translate(${e.clientX - size / 2}px, ${e.clientY - size / 2}px)`;
       el.style.opacity = '1';
     };
-    const handleLeave = () => { el.style.opacity = '0'; };
-    const handleEnter = () => { el.style.opacity = '1'; };
-
-    // Use mousemove (fires without button press) instead of pointermove
-    document.addEventListener('mousemove', handleMove);
-    document.addEventListener('mouseleave', handleLeave);
-    document.addEventListener('mouseenter', handleEnter);
-    return () => {
-      document.removeEventListener('mousemove', handleMove);
-      document.removeEventListener('mouseleave', handleLeave);
-      document.removeEventListener('mouseenter', handleEnter);
+    // On touch the ring has no hover state to live in, so it fades with the lift.
+    const handleUp = (e: PointerEvent) => {
+      if (e.pointerType !== 'mouse') el.style.opacity = '0';
     };
-  }, [size, zoom]);
+    const handleLeave = () => { el.style.opacity = '0'; };
 
-  const screenSize = size * zoom;
+    document.addEventListener('pointermove', handleMove, { passive: true });
+    document.addEventListener('pointerdown', handleMove, { passive: true });
+    document.addEventListener('pointerup', handleUp, { passive: true });
+    document.addEventListener('pointercancel', handleUp, { passive: true });
+    document.addEventListener('pointerleave', handleLeave);
+    return () => {
+      document.removeEventListener('pointermove', handleMove);
+      document.removeEventListener('pointerdown', handleMove);
+      document.removeEventListener('pointerup', handleUp);
+      document.removeEventListener('pointercancel', handleUp);
+      document.removeEventListener('pointerleave', handleLeave);
+    };
+  }, [size]);
+
+  const screenSize = size;
   return (
     <div
       ref={ref}

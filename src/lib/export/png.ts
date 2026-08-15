@@ -1,66 +1,90 @@
 import { WhiteboardElement, GridSettings, Viewport } from '@/types';
 import { renderCanvas } from '../canvas/renderer';
+import { getContentBounds } from './bounds';
 
 interface ExportOptions {
   elements: WhiteboardElement[];
   grid: GridSettings;
   scale?: number;
   background?: string;
-  resolvedTheme?: 'light' | 'dark';
+  /** Export with no background at all (PNG alpha). */
+  transparent?: boolean;
+  padding?: number;
 }
 
-export const exportToPNG = async ({ elements, grid, scale = 2, background = '#1e1e1e', resolvedTheme = 'dark' }: ExportOptions) => {
-  // Find bounding box of all elements to just export the drawn area
-  if (elements.length === 0) return;
+/** Render the given elements to an off-screen canvas cropped to their bounds. */
+export const renderToCanvas = ({
+  elements,
+  grid,
+  scale = 2,
+  background = '#1e1e1e',
+  transparent = false,
+  padding = 40,
+}: ExportOptions): HTMLCanvasElement | null => {
+  if (elements.length === 0) return null;
 
-  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-  elements.forEach(el => {
-    minX = Math.min(minX, el.x);
-    minY = Math.min(minY, el.y);
-    maxX = Math.max(maxX, el.x + el.width);
-    maxY = Math.max(maxY, el.y + el.height);
-  });
-
-  const padding = 40;
-  const width = Math.max(100, maxX - minX + padding * 2);
-  const height = Math.max(100, maxY - minY + padding * 2);
+  const bounds = getContentBounds(elements, padding);
+  const width = Math.max(1, bounds.maxX - bounds.minX);
+  const height = Math.max(1, bounds.maxY - bounds.minY);
 
   const canvas = document.createElement('canvas');
-  const dpr = window.devicePixelRatio || 1;
-  const finalScale = scale * dpr;
-
-  canvas.width = width * finalScale;
-  canvas.height = height * finalScale;
+  // `scale` is already the export multiplier the user picked; multiplying by
+  // devicePixelRatio as well made "1x" mean 2x or 3x depending on the monitor.
+  canvas.width = Math.round(width * scale);
+  canvas.height = Math.round(height * scale);
 
   const ctx = canvas.getContext('2d');
-  if (!ctx) return;
-
-  ctx.scale(finalScale, finalScale);
-  const bgFill = background === 'transparent'
-    ? (resolvedTheme === 'light' ? '#ffffff' : '#1e1e1e')
-    : background;
-  ctx.fillStyle = bgFill;
-  ctx.fillRect(0, 0, width, height);
+  if (!ctx) return null;
+  ctx.scale(scale, scale);
 
   const exportViewport: Viewport = {
-    x: -minX + padding,
-    y: -minY + padding,
+    x: -bounds.minX,
+    y: -bounds.minY,
     zoom: 1,
     width,
-    height
+    height,
   };
 
-  // Temporarily clear selected IDs for export
-  const selectedIds = new Set<string>();
+  renderCanvas(
+    canvas,
+    elements,
+    new Set<string>(),               // never draw selection handles into an export
+    exportViewport,
+    { ...grid, enabled: false },     // exports don't carry the grid, as in Excalidraw
+    transparent ? 'transparent' : background
+  );
 
-  renderCanvas(canvas, elements, selectedIds, exportViewport, grid, background, resolvedTheme);
+  return canvas;
+};
 
-  // Convert to image and download
+export const exportToPNG = async (options: ExportOptions & { filename?: string }) => {
+  const canvas = renderToCanvas(options);
+  if (!canvas) return;
+
   const dataUrl = canvas.toDataURL('image/png');
   const a = document.createElement('a');
   a.href = dataUrl;
-  a.download = `whiteboard-${new Date().toISOString().split('T')[0]}.png`;
+  a.download = options.filename ?? `whiteboard-${new Date().toISOString().split('T')[0]}.png`;
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
+};
+
+/** Copy the export straight to the clipboard (Excalidraw's "copy to clipboard"). */
+export const copyPNGToClipboard = async (options: ExportOptions): Promise<boolean> => {
+  const canvas = renderToCanvas(options);
+  if (!canvas || !navigator.clipboard?.write) return false;
+
+  const blob = await new Promise<Blob | null>((resolve) =>
+    canvas.toBlob(resolve, 'image/png')
+  );
+  if (!blob) return false;
+
+  try {
+    await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
+    return true;
+  } catch {
+    // Firefox and non-secure contexts reject clipboard.write for images.
+    return false;
+  }
 };

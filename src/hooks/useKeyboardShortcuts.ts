@@ -2,6 +2,8 @@
 
 import { useEffect } from 'react';
 import { useCanvasStore } from '@/store/canvas-store';
+import { useUIStore } from '@/store/ui-store';
+import { exportToJSON, pickAndParseScene } from '@/lib/export/json';
 import { ShapeType } from '@/types';
 
 export function useKeyboardShortcuts() {
@@ -24,6 +26,14 @@ export function useKeyboardShortcuts() {
   const viewport = useCanvasStore(state => state.viewport);
   const setZoom = useCanvasStore(state => state.setZoom);
   const zoomToFit = useCanvasStore(state => state.zoomToFit);
+  const groupSelected = useCanvasStore(state => state.groupSelected);
+  const ungroupSelected = useCanvasStore(state => state.ungroupSelected);
+  const toggleLockSelected = useCanvasStore(state => state.toggleLockSelected);
+  const flipSelected = useCanvasStore(state => state.flipSelected);
+  const copyStyle = useCanvasStore(state => state.copyStyle);
+  const pasteStyle = useCanvasStore(state => state.pasteStyle);
+  const updateGrid = useUIStore(state => state.updateGrid);
+  const setDialog = useUIStore(state => state.setDialog);
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -41,11 +51,40 @@ export function useKeyboardShortcuts() {
       const isShift = e.shiftKey;
       const key = e.key.toLowerCase();
 
+      // '?' opens the shortcut reference (Shift+/ on most layouts).
+      if (e.key === '?' && !isCtrl) {
+        e.preventDefault();
+        setDialog('help');
+        return;
+      }
+
+      // --- File shortcuts ---
+      if (isCtrl && key === 's') {
+        e.preventDefault();
+        const s = useCanvasStore.getState();
+        exportToJSON(s.elements, s.canvasBackground);
+        return;
+      }
+      if (isCtrl && key === 'o') {
+        e.preventDefault();
+        pickAndParseScene().then((scene) => {
+          if (scene) useCanvasStore.getState().loadScene(scene.elements, scene.background);
+        });
+        return;
+      }
+      if (isCtrl && isShift && key === 'e') {
+        e.preventDefault();
+        setDialog('export');
+        return;
+      }
+
       // --- Tool Shortcuts (no modifier) ---
-      if (!isCtrl) {
+      // Shift is excluded here: Shift+H and Shift+V are flip, and the tool
+      // switch used to fire alongside them.
+      if (!isCtrl && !isShift) {
         switch (key) {
           case 'v':
-            if (!isShift) { e.preventDefault(); setTool('select'); }
+            e.preventDefault(); setTool('select');
             break;
           case 'h':
             e.preventDefault(); setTool('hand');
@@ -70,6 +109,9 @@ export function useKeyboardShortcuts() {
             break;
           case 'e':
             e.preventDefault(); setTool('eraser');
+            break;
+          case 'k':
+            e.preventDefault(); setTool('laser');
             break;
           case 'escape':
             e.preventDefault();
@@ -101,9 +143,40 @@ export function useKeyboardShortcuts() {
         }
       }
 
+      // --- Shift shortcuts (no Ctrl) ---
+      if (isShift && !isCtrl) {
+        switch (key) {
+          case 'h':
+            e.preventDefault(); flipSelected('horizontal');
+            return;
+          case 'v':
+            e.preventDefault(); flipSelected('vertical');
+            return;
+          case '1':
+          case '!':
+            e.preventDefault(); zoomToFit();
+            return;
+        }
+      }
+
       // --- Ctrl/Cmd shortcuts ---
       if (isCtrl) {
+        // Style clipboard is Ctrl+Alt+C / Ctrl+Alt+V, checked before plain copy.
+        if (e.altKey && key === 'c') { e.preventDefault(); copyStyle(); return; }
+        if (e.altKey && key === 'v') { e.preventDefault(); pasteStyle(); return; }
+
         switch (key) {
+          case 'g':
+            e.preventDefault();
+            if (isShift) ungroupSelected(); else groupSelected();
+            break;
+          case 'l':
+            if (isShift) { e.preventDefault(); toggleLockSelected(); }
+            break;
+          case "'":
+            e.preventDefault();
+            updateGrid({ enabled: !useUIStore.getState().grid.enabled });
+            break;
           case 'z':
             e.preventDefault();
             if (isShift) { if (canRedo()) redo(); }
