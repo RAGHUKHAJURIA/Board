@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useDragControls } from 'framer-motion';
 import { createPortal } from 'react-dom';
 import { motion, AnimatePresence } from 'framer-motion';
@@ -204,6 +204,46 @@ function EraserPanel({
   );
 }
 
+/* ─────────────────────────────────────────────────────────
+   Quick colour strip — sits either side of the pen tool so a
+   colour can be picked before reaching for the pen and again
+   once the pen is already selected.
+───────────────────────────────────────────────────────── */
+const QUICK_COLORS = ['#e2e8f0', '#f43f5e', '#22c55e', '#3b82f6', '#eab308'];
+
+function QuickColors({
+  vertical,
+  stroke,
+  onColor,
+}: {
+  vertical: boolean;
+  stroke: string;
+  onColor: (c: string) => void;
+}) {
+  return (
+    <div
+      // Two columns when vertical: five stacked swatches would push the tools
+      // below the fold on a tablet-height toolbar.
+      className={`${vertical ? 'grid grid-cols-2 place-items-center py-1' : 'flex flex-row items-center px-1'} gap-1 shrink-0`}
+    >
+      {QUICK_COLORS.map((c) => (
+        <button
+          key={c}
+          onClick={(e) => { e.stopPropagation(); onColor(c); }}
+          className={`w-3.5 h-3.5 rounded-full border transition-transform ${
+            stroke === c
+              ? 'border-foreground scale-125 shadow-[0_0_0_1.5px_var(--foreground)]'
+              : 'border-zinc-300 dark:border-zinc-600 hover:scale-110'
+          }`}
+          style={{ backgroundColor: c }}
+          title={c}
+          aria-label={`Colour ${c}`}
+        />
+      ))}
+    </div>
+  );
+}
+
 /* ═══════════════════════════════════════════════════════
    Main Toolbar
 ═══════════════════════════════════════════════════════ */
@@ -322,7 +362,7 @@ export function AdvancedToolbar() {
       ? 'absolute left-full ml-2 top-1/2 -translate-y-1/2'
       : 'absolute bottom-full mb-2 left-1/2 -translate-x-1/2';
 
-    return (
+    const button = (
       <button
         key={t.id}
         onClick={handleClick}
@@ -337,6 +377,20 @@ export function AdvancedToolbar() {
         </div>
       </button>
     );
+
+    // Colour swatches flank the pen so one is always in reach, whether you
+    // pick the colour first or the pen first.
+    if (t.id === ShapeType.FREEHAND) {
+      return (
+        <React.Fragment key={t.id}>
+          <QuickColors vertical={isVertical} stroke={currentStyle.stroke} onColor={handleColorChange} />
+          {button}
+          <QuickColors vertical={isVertical} stroke={currentStyle.stroke} onColor={handleColorChange} />
+        </React.Fragment>
+      );
+    }
+
+    return button;
   };
 
   /* ── Portalled panels ─────────────────────────────────────── */

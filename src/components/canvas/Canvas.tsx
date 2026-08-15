@@ -5,8 +5,9 @@ import { useCanvasStore } from '@/store/canvas-store';
 import { useUIStore } from '@/store/ui-store';
 import { renderCanvas, type ErasePreview } from '@/lib/canvas/renderer';
 import { renderFreehand } from '@/lib/canvas/freehand';
-import { Point, ShapeType, WhiteboardElement, FreehandElement, ShapeElement, TextElement, ConnectorElement, ImageElement } from '@/types';
-import { isPointInBox } from '@/lib/utils/geometry';
+import { Point, ShapeType, WhiteboardElement, FreehandElement, ShapeElement, TextElement, ConnectorElement, ImageElement, BoundingBox } from '@/types';
+import { isPointInBox, getElementBBox } from '@/lib/utils/geometry';
+import { computeSnap, drawGuides, type SmartGuide } from '@/lib/canvas/smart-guides';
 import { SelectionBox } from './SelectionBox';
 import { IconPicker } from './IconPicker';
 import { ContextMenu, type ContextMenuState } from './ContextMenu';
@@ -113,6 +114,13 @@ export function Canvas() {
   const spatialIndexRef = useRef<SpatialIndex>(new SpatialIndex());
   const eraserRef = useRef<EraserManager | null>(null);
   const dragStartElementPositions = useRef<Record<string, Point>>({});
+  // Drag origin and the selection's bounds at that moment — snapping corrects a
+  // proposed absolute position, so it needs both.
+  const dragStartWorldRef = useRef<Point | null>(null);
+  const dragStartBoundsRef = useRef<BoundingBox | null>(null);
+  const activeGuidesRef = useRef<SmartGuide[]>([]);
+  // Element under the cursor with the select tool, for the hover outline.
+  const hoveredElementRef = useRef<string | null>(null);
   const resizeHandleRef = useRef<ResizeHandle | null>(null);
   const resizeStartBounds = useRef<{ x: number; y: number; width: number; height: number } | null>(null);
   const resizeGroupStartBounds = useRef<{ x: number; y: number; width: number; height: number } | null>(null);
@@ -156,6 +164,12 @@ export function Canvas() {
   // Space held = temporary hand tool, as in Excalidraw. A ref because the
   // native drawing listeners need to see it without re-registering.
   const spaceDownRef = useRef(false);
+
+  // Two-finger pinch/pan is in progress — the drawing listeners must stand down.
+  const gestureActiveRef = useRef(false);
+  // Single finger acting as a scroll gesture rather than a stroke: Excalidraw's
+  // pen mode, where only the stylus draws and a finger moves the canvas.
+  const fingerPanRef = useRef<{ pointerId: number; x: number; y: number } | null>(null);
 
   // Initialize EraserManager
   useEffect(() => {
@@ -304,9 +318,99 @@ export function Canvas() {
     if (!canvasRef.current) return;
     const canvas = canvasRef.current; // TS narrows: HTMLCanvasElement
 
+    // ── Touch gestures ────────────────────────────────────────────────────
+    // Registered first, and native rather than React, so pinch/pan can never be
+    // swallowed by the pen-mode gate or by the early returns that hand drawing
+    // tools off to the native listeners.
+    const applyPinch = (scale: number, cx: number, cy: number) => {
+      const vp = useCanvasStore.getState().viewport;
+      // Same clamp as the wheel path; pinch used to stop at 5× while the wheel
+      // went to 10×, so a tablet simply could not zoom as far as a laptop.
+      const zoom = Math.max(0.05, Math.min(vp.zoom * scale, 10));
+      const k = zoom / vp.zoom;
+      useCanvasStore.getState().updateViewport({
+        zoom,
+        x: cx - (cx - vp.x) * k,
+        y: cy - (cy - vp.y) * k,
+      });
+    };
+
+    const applyPan = (dx: number, dy: number) => {
+      const vp = useCanvasStore.getState().viewport;
+      useCanvasStore.getState().updateViewport({ x: vp.x + dx, y: vp.y + dy });
+    };
+
+    function handleNativeTouchDown(e: PointerEvent) {
+      if (e.pointerType !== 'touch') return;
+      const store = useCanvasStore.getState();
+
+      const decision = gestureHandler.onPointerDown(e);
+
+      if (decision === 'reject') {
+        rejectedPointers.current.add(e.pointerId);
+        return;
+      }
+
+      if (decision === 'gesture') {
+        e.preventDefault();
+        // A second finger means the first one was never a stroke.
+        abortActiveStroke();
+        cancelErase();
+        laserRef.current.clear();
+        fingerPanRef.current = null;
+        gestureActiveRef.current = true;
+        setMode('panning');
+        return;
+      }
+
+      // Single finger. If the gate won't let it draw — pen mode with a real
+      // stylus around — it scrolls the canvas instead of doing nothing at all,
+      // which is exactly how Excalidraw's pen mode behaves.
+      const im = store.inputMode;
+      if (gatePointerEvent(e, im.mode, im.isTouchDevice) !== 'allow') {
+        e.preventDefault();
+        fingerPanRef.current = { pointerId: e.pointerId, x: e.clientX, y: e.clientY };
+      }
+    }
+
+    function handleNativeTouchMove(e: PointerEvent) {
+      if (e.pointerType !== 'touch') return;
+
+      if (gestureHandler.onPointerMove(e, applyPinch, applyPan)) {
+        e.preventDefault();
+        return;
+      }
+
+      const pan = fingerPanRef.current;
+      if (pan && pan.pointerId === e.pointerId) {
+        e.preventDefault();
+        applyPan(e.clientX - pan.x, e.clientY - pan.y);
+        pan.x = e.clientX;
+        pan.y = e.clientY;
+      }
+    }
+
+    function handleNativeTouchUp(e: PointerEvent) {
+      if (e.pointerType !== 'touch') return;
+
+      gestureHandler.onPointerUp(e);
+      rejectedPointers.current.delete(e.pointerId);
+      if (fingerPanRef.current?.pointerId === e.pointerId) fingerPanRef.current = null;
+
+      if (!gestureHandler.isGestureActive()) {
+        gestureActiveRef.current = false;
+        if (modeRef.current === 'panning') {
+          setMode('idle');
+          setIsInteracting(false);
+        }
+      }
+    }
+
     function handleNativeFreehandDown(e: PointerEvent) {
       // Space held is a temporary hand tool — pan, don't draw.
       if (spaceDownRef.current) return;
+      // A finger that is scrolling or pinching is not drawing.
+      if (gestureActiveRef.current || fingerPanRef.current) return;
 
       const store = useCanvasStore.getState();
       const currentTool = store.tool;
@@ -556,6 +660,7 @@ export function Canvas() {
 
     function handleNativeEraserDown(e: PointerEvent) {
       if (spaceDownRef.current) return;
+      if (gestureActiveRef.current || fingerPanRef.current) return;
       const store = useCanvasStore.getState();
       if (store.tool !== 'eraser' || e.button === 2) return;
       // A second contact is a pinch or a pan, never a wipe.
@@ -609,8 +714,17 @@ export function Canvas() {
     // ── Laser pointer ─────────────────────────────────────────────────────
     function handleNativeLaserDown(e: PointerEvent) {
       if (spaceDownRef.current) return;
-      if (useCanvasStore.getState().tool !== 'laser' || e.button === 2) return;
+      if (gestureActiveRef.current || fingerPanRef.current) return;
+      const store = useCanvasStore.getState();
+      if (store.tool !== 'laser' || e.button === 2) return;
       if (!e.isPrimary) return;
+
+      // The laser had no input gating at all, so on a tablet a palm or a
+      // pinching finger painted a trail while every other tool correctly
+      // ignored it.
+      const im = store.inputMode;
+      if (gatePointerEvent(e, im.mode, im.isTouchDevice) !== 'allow') return;
+
       e.preventDefault();
       try { canvas.setPointerCapture(e.pointerId); } catch {}
       laserPointerRef.current = e.pointerId;
@@ -621,6 +735,7 @@ export function Canvas() {
 
     function handleNativeLaserMove(e: PointerEvent) {
       if (laserPointerRef.current !== e.pointerId) return;
+      if (gestureActiveRef.current) return;
       e.preventDefault();
       const vp = useCanvasStore.getState().viewport;
       for (const [x, y] of extractRawCoalescedPoints(e, canvas, vp)) {
@@ -633,6 +748,12 @@ export function Canvas() {
       laserPointerRef.current = null;
       // The tail is left to fade on its own rather than snapping away.
     }
+
+    // Gestures first: they decide whether the contact is a stroke at all.
+    canvas.addEventListener('pointerdown', handleNativeTouchDown, { passive: false });
+    canvas.addEventListener('pointermove', handleNativeTouchMove, { passive: false });
+    canvas.addEventListener('pointerup', handleNativeTouchUp, { passive: true });
+    canvas.addEventListener('pointercancel', handleNativeTouchUp, { passive: true });
 
     // Use { passive: false } so we can call preventDefault() to block Scribble
     canvas.addEventListener('pointerdown', handleNativeFreehandDown, { passive: false });
@@ -655,6 +776,10 @@ export function Canvas() {
     canvas.addEventListener('lostpointercapture', handleNativeEraserUp, { passive: true });
 
     return () => {
+      canvas.removeEventListener('pointerdown', handleNativeTouchDown);
+      canvas.removeEventListener('pointermove', handleNativeTouchMove);
+      canvas.removeEventListener('pointerup', handleNativeTouchUp);
+      canvas.removeEventListener('pointercancel', handleNativeTouchUp);
       canvas.removeEventListener('pointerdown', handleNativeFreehandDown);
       canvas.removeEventListener('pointermove', handleNativeFreehandMove);
       canvas.removeEventListener('pointerup', handleNativeFreehandUp);
@@ -670,7 +795,7 @@ export function Canvas() {
       canvas.removeEventListener('pointerup', handleNativeLaserUp);
       canvas.removeEventListener('pointercancel', handleNativeLaserUp);
     };
-  }, [finalizeActiveStroke, abortActiveStroke, setIsInteracting, setMode, syncErasePreview, commitErase]);
+  }, [finalizeActiveStroke, abortActiveStroke, setIsInteracting, setMode, syncErasePreview, commitErase, cancelErase]);
 
   // ── Live-stroke overlay loop ────────────────────────────────────────────
   // Redraws only the stroke currently under the pen, and only when new points
@@ -1008,6 +1133,36 @@ export function Canvas() {
         }
       }
 
+      // Hover outline (select tool, nothing else going on)
+      const hoveredId = hoveredElementRef.current;
+      if (hoveredId && modeRef.current === 'idle' && !selectedIds.has(hoveredId)) {
+        const el = elements[hoveredId];
+        const ctx = canvasRef.current!.getContext('2d');
+        if (el && ctx) {
+          const b = el.bbox ?? getElementBBox(el);
+          const pad = 4 / viewport.zoom;
+          ctx.save();
+          ctx.translate(viewport.x, viewport.y);
+          ctx.scale(viewport.zoom, viewport.zoom);
+          ctx.strokeStyle = 'rgba(99, 102, 241, 0.65)';
+          ctx.lineWidth = 1.5 / viewport.zoom;
+          ctx.strokeRect(b.minX - pad, b.minY - pad, (b.maxX - b.minX) + pad * 2, (b.maxY - b.minY) + pad * 2);
+          ctx.restore();
+        }
+      }
+
+      // Alignment guides for the element being dragged
+      if (activeGuidesRef.current.length > 0 && modeRef.current === 'dragging') {
+        const ctx = canvasRef.current!.getContext('2d');
+        if (ctx) {
+          ctx.save();
+          ctx.translate(viewport.x, viewport.y);
+          ctx.scale(viewport.zoom, viewport.zoom);
+          drawGuides(ctx, activeGuidesRef.current, viewport);
+          ctx.restore();
+        }
+      }
+
       // Draw binding highlight
       if (hoveredBindTarget) {
         const el = elements[hoveredBindTarget];
@@ -1062,31 +1217,18 @@ export function Canvas() {
 
     if (e.button === 2) return; // ignore right-click
 
-    // ── Touch gestures come first ──────────────────────────────────────────
-    // Before the pen-mode gate, and before the freehand/eraser hand-off below:
-    // two fingers are always pan/zoom and never a stroke. Running this after
-    // the gate meant pen mode on a tablet rejected the contacts and left no way
-    // to scroll the board; running it after the hand-off meant selecting the
-    // pen or eraser tool killed pinch-zoom entirely.
+    // Touch gestures and finger-panning are handled by the native listeners
+    // above, which run first and have already claimed this contact.
     if (nativeEvent.pointerType === 'touch') {
-      const result = gestureHandler.onPointerDown(nativeEvent);
-
-      if (result === 'reject') {
-        rejectedPointers.current.add(e.pointerId);
-        return;
-      }
-
-      if (result === 'gesture') {
-        // Second finger down — whatever the first one was doing is not a stroke.
-        abortActiveStroke();
-        cancelErase();
+      if (gestureActiveRef.current || fingerPanRef.current) {
+        // Cancel a shape drag that a second finger interrupted.
         if (modeRef.current === 'drawing') {
           const lastEl = elements[currentElementRef.current?.id || ''];
           if (lastEl) deleteElements([lastEl.id]);
         }
-        setMode('panning');
         return;
       }
+      if (rejectedPointers.current.has(e.pointerId)) return;
     }
 
     const decision = gatePointerEvent(nativeEvent, inputMode.mode, inputMode.isTouchDevice);
@@ -1238,10 +1380,19 @@ export function Canvas() {
         // selection with the freshly pasted copies).
         dragStartElementPositions.current = {};
         const liveElements = useCanvasStore.getState().elements;
+        let bMinX = Infinity, bMinY = Infinity, bMaxX = -Infinity, bMaxY = -Infinity;
         useCanvasStore.getState().selectedIds.forEach(id => {
           const el = liveElements[id];
-          if (el) dragStartElementPositions.current[id] = { x: el.x, y: el.y };
+          if (!el) return;
+          dragStartElementPositions.current[id] = { x: el.x, y: el.y };
+          const b = el.bbox ?? getElementBBox(el);
+          bMinX = Math.min(bMinX, b.minX); bMinY = Math.min(bMinY, b.minY);
+          bMaxX = Math.max(bMaxX, b.maxX); bMaxY = Math.max(bMaxY, b.maxY);
         });
+        dragStartWorldRef.current = world;
+        dragStartBoundsRef.current = bMinX === Infinity
+          ? null
+          : { minX: bMinX, minY: bMinY, maxX: bMaxX, maxY: bMaxY };
 
         // Enter drag mode if using select tool
         if (tool === 'select') {
@@ -1330,26 +1481,8 @@ export function Canvas() {
     // Skip rejected (palm) pointers
     if (rejectedPointers.current.has(e.pointerId)) return;
 
-    // Two-finger gestures, evaluated before the pen-mode gate for the same
-    // reason as in pointerdown: pinch/pan must survive palm rejection.
-    const wasGesture = gestureHandler.onPointerMove(
-      nativeEvent,
-      (scale, cx, cy) => {
-        // Pinch zoom
-        const vp = useCanvasStore.getState().viewport;
-        const s = Math.max(0.1, Math.min(vp.zoom * scale, 5));
-        const newX = cx - (cx - vp.x) * (s / vp.zoom);
-        const newY = cy - (cy - vp.y) * (s / vp.zoom);
-        useCanvasStore.getState().updateViewport({ zoom: s, x: newX, y: newY });
-      },
-      (dx, dy) => {
-        // Two-finger pan
-        const vp = useCanvasStore.getState().viewport;
-        useCanvasStore.getState().updateViewport({ x: vp.x + dx, y: vp.y + dy });
-      }
-    );
-
-    if (wasGesture) return; // Don't process drawing/panning during gesture
+    // Pinch/pan and finger scrolling are applied by the native listeners.
+    if (gestureActiveRef.current || fingerPanRef.current) return;
 
     // Freehand and eraser moves belong to the native listeners.
     if ((tool === ShapeType.FREEHAND || tool === 'eraser' || tool === 'laser') && modeRef.current !== 'panning') {
@@ -1366,9 +1499,24 @@ export function Canvas() {
 
     if (modeRef.current === 'idle' || modeRef.current === 'resizing') {
       const hoverHit = hitTestConnectorHandles(world.x, world.y, elements, Array.from(selectedIds), viewport.zoom);
+
+      // Highlight whatever the select tool would pick up, so it is obvious what
+      // a click is about to grab — Excalidraw outlines the element under the
+      // cursor rather than leaving you to guess.
+      let hoveredId: string | null = null;
+      if (tool === 'select' && modeRef.current === 'idle' && !hoverHit) {
+        hoveredId = hitTestPoint(world.x, world.y, elements, viewport)?.elementId ?? null;
+      }
+      if (hoveredElementRef.current !== hoveredId) {
+        hoveredElementRef.current = hoveredId;
+        dirtyRef.current = true;
+      }
+
       if (containerRef.current) {
         if (hoverHit) {
           containerRef.current.style.cursor = hoverHit.handleType === 'midpoint' ? 'grab' : 'crosshair';
+        } else if (tool === 'select') {
+          containerRef.current.style.cursor = hoveredId ? 'move' : 'default';
         } else {
           containerRef.current.style.cursor = ''; // Let React handle it
         }
@@ -1396,14 +1544,50 @@ export function Canvas() {
       }
 
       case 'dragging': {
-        const wdx = world.x - screenToWorld(lastPointerPos.current.x, lastPointerPos.current.y).x;
-        const wdy = world.y - screenToWorld(lastPointerPos.current.x, lastPointerPos.current.y).y;
-        // Move all selected elements
-        const freshElements = useCanvasStore.getState().elements;
+        const start = dragStartWorldRef.current;
+        const startBounds = dragStartBoundsRef.current;
         const movedIds = Object.keys(dragStartElementPositions.current);
+        if (!start || !startBounds) break;
+
+        // Absolute offset from the drag origin rather than a per-move delta:
+        // the incremental version accumulated rounding drift, and snapping
+        // needs a proposed position it can correct rather than nudge.
+        let dx = world.x - start.x;
+        let dy = world.y - start.y;
+
+        // Shift locks the drag to whichever axis you have moved furthest along.
+        if (e.shiftKey) {
+          if (Math.abs(dx) >= Math.abs(dy)) dy = 0; else dx = 0;
+        }
+
+        const snapSettings = useUIStore.getState().snap;
+        const gridSettings = useUIStore.getState().grid;
+        let guides: SmartGuide[] = [];
+
+        if (snapSettings.enabled && !e.ctrlKey && !e.metaKey) {
+          const freshElements = useCanvasStore.getState().elements;
+          const moving = new Set(movedIds);
+          const others = Object.values(freshElements).filter((el) => !moving.has(el.id));
+          const proposed = {
+            minX: startBounds.minX + dx, minY: startBounds.minY + dy,
+            maxX: startBounds.maxX + dx, maxY: startBounds.maxY + dy,
+          };
+          const snap = computeSnap(proposed, others, viewport.zoom, {
+            snapToObjects: snapSettings.snapToObjects,
+            snapToGrid: snapSettings.snapToGrid && gridSettings.enabled,
+            gridSize: gridSettings.size,
+            snapDistance: snapSettings.snapDistance,
+          });
+          dx += snap.dx;
+          dy += snap.dy;
+          if (snapSettings.showGuides) guides = snap.guides;
+        }
+
+        activeGuidesRef.current = guides;
+
         movedIds.forEach((id) => {
-          const el = freshElements[id];
-          if (el) updateElement(id, { x: el.x + wdx, y: el.y + wdy });
+          const from = dragStartElementPositions.current[id];
+          if (from) updateElement(id, { x: from.x + dx, y: from.y + dy });
         });
         // Trigger connector updates for all moved elements at once
         useCanvasStore.getState().updateAttachedConnectors(movedIds, useCanvasStore.getState().getElementsMap());
@@ -1636,14 +1820,12 @@ export function Canvas() {
 
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const handlePointerUp = (e: React.PointerEvent) => {
-    // Always clear rejected pointers and gesture state first so we never leak pointer IDs!
-    rejectedPointers.current.delete(e.pointerId);
-    gestureHandler.onPointerUp(e.nativeEvent);
-
-    // A pinch that was panning ends here whatever the active tool is.
-    if (modeRef.current === 'panning' && e.nativeEvent.pointerType === 'touch') {
-      setMode('idle');
-      setIsInteracting(false);
+    // Touch lifecycle (including gesture teardown) is owned by the native
+    // listeners; a non-touch pointer never enters them, so clean up here.
+    if (e.nativeEvent.pointerType !== 'touch') {
+      rejectedPointers.current.delete(e.pointerId);
+      gestureHandler.onPointerUp(e.nativeEvent);
+    } else if (gestureActiveRef.current || fingerPanRef.current) {
       return;
     }
 
@@ -1731,6 +1913,9 @@ export function Canvas() {
       // Save snapshot after move
       saveSnapshot();
       dragStartElementPositions.current = {};
+      dragStartWorldRef.current = null;
+      dragStartBoundsRef.current = null;
+      activeGuidesRef.current = [];
     }
 
     if (prevMode === 'resizing' || prevMode === 'rotating') {
@@ -2084,6 +2269,9 @@ export function Canvas() {
     if (mode === 'resizing') return 'nwse-resize';
     if (mode === 'rotating') return 'grabbing';
     if (tool === ShapeType.IMAGE) return 'crosshair';
+    // The select tool is a pointer, not a crosshair — a crosshair reads as
+    // "about to draw", which is the one thing select does not do.
+    if (tool === 'select') return 'default';
     return 'crosshair';
   };
 
@@ -2158,7 +2346,10 @@ export function Canvas() {
           WebkitUserSelect: 'none',
           userSelect: 'none',
           WebkitTouchCallout: 'none',
-          cursor: 'crosshair',
+          // Inherit, don't override: the canvas covers the whole container, so
+          // a hardcoded crosshair here meant the select/move/hand cursors the
+          // container sets were never actually visible.
+          cursor: 'inherit',
         }}
       />
 

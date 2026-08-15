@@ -1,120 +1,174 @@
-import { WhiteboardElement, Viewport } from '@/types';
+import { WhiteboardElement, BoundingBox, Viewport } from '@/types';
+import { getElementBBox } from '../utils/geometry';
+
+/**
+ * Object and grid snapping with Excalidraw-style alignment guides.
+ *
+ * The previous version of this file was never imported by anything, and its
+ * snap step assigned `element.x = guide.position` regardless of which edge the
+ * guide came from — so snapping to another shape's centre or right edge would
+ * have teleported the element. This computes an offset instead, which is the
+ * only form that composes with a drag.
+ */
 
 export interface SmartGuide {
   type: 'vertical' | 'horizontal';
+  /** World coordinate of the line. */
   position: number;
-  elements: string[]; // IDs of elements aligned
+  /** Extent of the line, so it spans only the elements it relates. */
+  start: number;
+  end: number;
 }
 
-export class SmartGuideManager {
-  private snapDistance = 5;
-  private guides: SmartGuide[] = [];
-  
-  // Find alignment guides while dragging
-  findGuides(
-    draggingElement: WhiteboardElement,
-    allElements: WhiteboardElement[],
-    zoom: number
-  ): SmartGuide[] {
-    this.guides = [];
-    const threshold = this.snapDistance / zoom;
-    
-    const otherElements = allElements.filter(el => el.id !== draggingElement.id);
-    
-    // Check vertical alignment
-    otherElements.forEach(el => {
-      // Left edges
-      if (Math.abs(draggingElement.x - el.x) < threshold) {
-        this.addGuide('vertical', el.x, [draggingElement.id, el.id]);
+export interface SnapOptions {
+  snapToObjects: boolean;
+  snapToGrid: boolean;
+  gridSize: number;
+  /** Screen-pixel snapping radius. */
+  snapDistance: number;
+}
+
+export interface SnapResult {
+  /** Correction to add to the proposed position. */
+  dx: number;
+  dy: number;
+  guides: SmartGuide[];
+}
+
+const NO_SNAP: SnapResult = { dx: 0, dy: 0, guides: [] };
+
+/** The three interesting coordinates of a box on one axis. */
+const spansX = (b: BoundingBox) => [b.minX, (b.minX + b.maxX) / 2, b.maxX];
+const spansY = (b: BoundingBox) => [b.minY, (b.minY + b.maxY) / 2, b.maxY];
+
+/**
+ * Snap `moving` against `others` (and optionally the grid).
+ * `moving` is the proposed bounding box, already offset by the raw drag.
+ */
+export function computeSnap(
+  moving: BoundingBox,
+  others: WhiteboardElement[],
+  zoom: number,
+  opts: SnapOptions
+): SnapResult {
+  const threshold = Math.max(opts.snapDistance, 6) / zoom;
+
+  let best = { ...NO_SNAP, guides: [] as SmartGuide[] };
+  let bestDx: number | null = null;
+  let bestDy: number | null = null;
+  const guides: SmartGuide[] = [];
+
+  if (opts.snapToObjects && others.length > 0) {
+    const movingX = spansX(moving);
+    const movingY = spansY(moving);
+
+    // Smallest correction wins; every pair achieving that same correction gets
+    // a guide, which is what makes a row of aligned shapes light up together.
+    let bestDistX = threshold;
+    let bestDistY = threshold;
+
+    for (const other of others) {
+      const b = other.bbox ?? getElementBBox(other);
+
+      for (const mx of movingX) {
+        for (const ox of spansX(b)) {
+          const dist = Math.abs(ox - mx);
+          if (dist < bestDistX) {
+            bestDistX = dist;
+            bestDx = ox - mx;
+          }
+        }
       }
-      
-      // Right edges
-      const dragRight = draggingElement.x + draggingElement.width;
-      const elRight = el.x + el.width;
-      if (Math.abs(dragRight - elRight) < threshold) {
-        this.addGuide('vertical', elRight, [draggingElement.id, el.id]);
+      for (const my of movingY) {
+        for (const oy of spansY(b)) {
+          const dist = Math.abs(oy - my);
+          if (dist < bestDistY) {
+            bestDistY = dist;
+            bestDy = oy - my;
+          }
+        }
       }
-      
-      // Centers
-      const dragCenterX = draggingElement.x + draggingElement.width / 2;
-      const elCenterX = el.x + el.width / 2;
-      if (Math.abs(dragCenterX - elCenterX) < threshold) {
-        this.addGuide('vertical', elCenterX, [draggingElement.id, el.id]);
+    }
+
+    // Second pass: now that the winning offset is known, collect the guides it
+    // produces. Doing this in the first pass would emit lines for candidates
+    // that lost.
+    const snappedX = bestDx !== null ? movingX.map((v) => v + bestDx!) : null;
+    const snappedY = bestDy !== null ? movingY.map((v) => v + bestDy!) : null;
+
+    for (const other of others) {
+      const b = other.bbox ?? getElementBBox(other);
+
+      if (snappedX) {
+        for (const ox of spansX(b)) {
+          if (snappedX.some((v) => Math.abs(v - ox) < 0.01)) {
+            guides.push({
+              type: 'vertical',
+              position: ox,
+              start: Math.min(moving.minY + (bestDy ?? 0), b.minY),
+              end: Math.max(moving.maxY + (bestDy ?? 0), b.maxY),
+            });
+          }
+        }
       }
-    });
-    
-    // Check horizontal alignment
-    otherElements.forEach(el => {
-      // Top edges
-      if (Math.abs(draggingElement.y - el.y) < threshold) {
-        this.addGuide('horizontal', el.y, [draggingElement.id, el.id]);
+      if (snappedY) {
+        for (const oy of spansY(b)) {
+          if (snappedY.some((v) => Math.abs(v - oy) < 0.01)) {
+            guides.push({
+              type: 'horizontal',
+              position: oy,
+              start: Math.min(moving.minX + (bestDx ?? 0), b.minX),
+              end: Math.max(moving.maxX + (bestDx ?? 0), b.maxX),
+            });
+          }
+        }
       }
-      
-      // Bottom edges
-      const dragBottom = draggingElement.y + draggingElement.height;
-      const elBottom = el.y + el.height;
-      if (Math.abs(dragBottom - elBottom) < threshold) {
-        this.addGuide('horizontal', elBottom, [draggingElement.id, el.id]);
-      }
-      
-      // Centers
-      const dragCenterY = draggingElement.y + draggingElement.height / 2;
-      const elCenterY = el.y + el.height / 2;
-      if (Math.abs(dragCenterY - elCenterY) < threshold) {
-        this.addGuide('horizontal', elCenterY, [draggingElement.id, el.id]);
-      }
-    });
-    
-    return this.guides;
+    }
   }
-  
-  private addGuide(type: 'vertical' | 'horizontal', position: number, elements: string[]) {
-    this.guides.push({ type, position, elements });
+
+  // The grid only gets a say on an axis that found no object to align to —
+  // otherwise the two fight and the element stutters between them.
+  if (opts.snapToGrid && opts.gridSize > 0) {
+    if (bestDx === null) {
+      const target = Math.round(moving.minX / opts.gridSize) * opts.gridSize;
+      if (Math.abs(target - moving.minX) < threshold) bestDx = target - moving.minX;
+    }
+    if (bestDy === null) {
+      const target = Math.round(moving.minY / opts.gridSize) * opts.gridSize;
+      if (Math.abs(target - moving.minY) < threshold) bestDy = target - moving.minY;
+    }
   }
-  
-  // Snap element to guides
-  snapToGuides(element: WhiteboardElement, guides: SmartGuide[]) {
-    guides.forEach(guide => {
-      if (guide.type === 'vertical') {
-        // Snap to vertical guide
-        element.x = guide.position;
-      } else {
-        // Snap to horizontal guide
-        element.y = guide.position;
-      }
-    });
+
+  best = { dx: bestDx ?? 0, dy: bestDy ?? 0, guides };
+  return best;
+}
+
+/** Draw guides into a context already transformed to world space. */
+export function drawGuides(
+  ctx: CanvasRenderingContext2D,
+  guides: SmartGuide[],
+  viewport: Viewport
+) {
+  if (guides.length === 0) return;
+  const pad = 8 / viewport.zoom;
+
+  ctx.save();
+  ctx.strokeStyle = '#ec4899';
+  ctx.lineWidth = 1 / viewport.zoom;
+  ctx.setLineDash([4 / viewport.zoom, 4 / viewport.zoom]);
+
+  for (const guide of guides) {
+    ctx.beginPath();
+    if (guide.type === 'vertical') {
+      ctx.moveTo(guide.position, guide.start - pad);
+      ctx.lineTo(guide.position, guide.end + pad);
+    } else {
+      ctx.moveTo(guide.start - pad, guide.position);
+      ctx.lineTo(guide.end + pad, guide.position);
+    }
+    ctx.stroke();
   }
-  
-  // Draw guides
-  drawGuides(ctx: CanvasRenderingContext2D, viewport: Viewport) {
-    ctx.save();
-    ctx.strokeStyle = '#FF6B6B';
-    ctx.lineWidth = 1 / viewport.zoom;
-    ctx.setLineDash([5, 5]);
-    
-    this.guides.forEach(guide => {
-      ctx.beginPath();
-      
-      if (guide.type === 'vertical') {
-        const startY = -10000;
-        const endY = 10000;
-        ctx.moveTo(guide.position, startY);
-        ctx.lineTo(guide.position, endY);
-      } else {
-        const startX = -10000;
-        const endX = 10000;
-        ctx.moveTo(startX, guide.position);
-        ctx.lineTo(endX, guide.position);
-      }
-      
-      ctx.stroke();
-    });
-    
-    ctx.setLineDash([]);
-    ctx.restore();
-  }
-  
-  clearGuides() {
-    this.guides = [];
-  }
+
+  ctx.setLineDash([]);
+  ctx.restore();
 }

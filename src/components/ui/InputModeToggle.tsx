@@ -57,7 +57,7 @@ export function InputModeToggle() {
             whitespace-nowrap pointer-events-none
           "
         >
-          {isPenMode ? 'Pen Mode — touch blocked' : 'Hand Mode — touch enabled'}
+          {isPenMode ? 'Pen mode — finger scrolls, stylus draws' : 'Hand mode — finger draws'}
         </motion.div>
       </AnimatePresence>
 
@@ -79,8 +79,8 @@ export function InputModeToggle() {
               : 'text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200 hover:bg-zinc-100 dark:hover:bg-zinc-800'
             }
           `}
-          aria-label="Switch to Pen Mode — blocks touch/palm input"
-          title="Pen Mode"
+          aria-label="Pen mode — only the stylus draws, a finger scrolls the canvas"
+          title="Pen mode"
         >
           <PenIcon />
           {isPenMode && (
@@ -103,8 +103,8 @@ export function InputModeToggle() {
               : 'text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200 hover:bg-zinc-100 dark:hover:bg-zinc-800'
             }
           `}
-          aria-label="Switch to Hand Mode — enables touch/finger input"
-          title="Hand Mode"
+          aria-label="Hand mode — a finger draws, two fingers pan and zoom"
+          title="Hand mode"
         >
           <HandIcon />
           {!isPenMode && (

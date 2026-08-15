@@ -31,7 +31,9 @@ export const useUIStore = create<UIState>()(
   persist(
     immer((set) => ({
       panels: {
-        layers: true,
+        // Closed on first load — it covered the canvas before you had drawn
+        // anything. Reopen from the tab on the panel's edge.
+        layers: false,
         properties: true,
         library: false,
       },

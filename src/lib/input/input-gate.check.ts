@@ -50,6 +50,9 @@ function main() {
   assert.equal(deviceHasRealPen(), true);
 
   // Now that a real pen exists on this device, bare touch is palm — block it.
+  // 'block-touch' means "not a stroke", NOT "ignore entirely": the canvas turns
+  // a blocked primary contact into a one-finger scroll, which is what pen mode
+  // does in Excalidraw. Anything reading this decision has to honour that.
   assert.equal(gatePointerEvent(ev({ pointerType: 'touch' }), 'pen', true), 'block-touch');
   // The pen itself keeps drawing, and fingers still work in hand mode.
   assert.equal(gatePointerEvent(ev({ pointerType: 'pen' }), 'pen', true), 'allow');
