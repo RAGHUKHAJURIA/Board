@@ -14,6 +14,7 @@ import { useUIStore } from '@/store/ui-store';
 import { ColorPicker } from '../toolbar/ColorPicker';
 import { WhiteboardElement, ShapeType, ConnectorElement, ImageElement, TextElement } from '@/types';
 import { layoutText, FONT_FAMILIES } from '@/lib/canvas/text';
+import { ARROWHEADS, ARROWHEAD_LABELS } from '@/lib/canvas/arrowheads';
 
 export function PropertiesPanel() {
   const elements = useCanvasStore(state => state.elements);
@@ -315,6 +316,51 @@ export function PropertiesPanel() {
                 </div>
               )}
             </>
+          )}
+
+          {/* Arrowheads — both ends are independent, so one-way, double-headed
+              and plain lines are all the same control. */}
+          {element.type === ShapeType.CONNECTOR && (
+            <div className="flex flex-col gap-2">
+              <span className="text-[10px] text-zinc-500 dark:text-zinc-400">Arrowheads</span>
+              {([
+                { key: 'startArrowhead' as const, label: 'Start', fallback: 'none' },
+                { key: 'endArrowhead' as const, label: 'End', fallback: 'triangle' },
+              ]).map(({ key, label, fallback }) => {
+                const current = (element as ConnectorElement)[key] ?? fallback;
+                return (
+                  <div key={key} className="flex flex-col gap-1">
+                    <span className="text-[10px] text-zinc-400">{label}</span>
+                    <div className="grid grid-cols-3 gap-1">
+                      {ARROWHEADS.map((head) => (
+                        <button
+                          key={head}
+                          title={ARROWHEAD_LABELS[head]}
+                          onClick={() => handleChange({ [key]: head } as Partial<WhiteboardElement>)}
+                          className={`px-1 py-1 rounded border text-[9px] leading-tight ${
+                            current === head
+                              ? 'border-foreground bg-foreground text-background font-medium'
+                              : 'border-zinc-300 dark:border-zinc-700 text-zinc-500 hover:border-zinc-500'
+                          }`}
+                        >
+                          {ARROWHEAD_LABELS[head]}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                );
+              })}
+
+              <button
+                onClick={() => handleChange({
+                  startArrowhead: 'triangle',
+                  endArrowhead: 'triangle',
+                } as Partial<WhiteboardElement>)}
+                className="mt-1 px-2 py-1.5 text-[10px] rounded border border-zinc-300 dark:border-zinc-700 text-zinc-500 hover:border-zinc-500"
+              >
+                ↔ Make double-headed
+              </button>
+            </div>
           )}
 
           {/* Connector Routing Mode */}

@@ -2,9 +2,10 @@ import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import { immer } from 'zustand/middleware/immer';
 import { enableMapSet } from 'immer';
-import { WhiteboardElement, ConnectorElement, Viewport, Tool, ShapeType, IconElement, FreehandElement, ImageElement, TextElement, StyleProperties, Point } from '@/types';
+import { WhiteboardElement, ConnectorElement, Viewport, Tool, ShapeType, IconElement, FreehandElement, ImageElement, TextElement, StickyElement, StyleProperties, Point } from '@/types';
 import type { CanvasInputMode, InputModeState } from '@/types/input';
 import { getElementBBox } from '@/lib/utils/geometry';
+import { STICKY_COLORS, STICKY_INK, STICKY_DOT_SIZE } from '@/lib/canvas/sticky';
 import { ConnectorManager } from '@/lib/canvas/connectors';
 import { ConnectorHandleHit } from '@/lib/canvas/hit-testing';
 import { useUIStore } from '@/store/ui-store';
@@ -84,6 +85,10 @@ interface CanvasState {
 
   // Alignment
   alignElements: (alignment: 'left' | 'center-h' | 'right' | 'top' | 'center-v' | 'bottom') => void;
+
+  /** Drop a sticky note at a world point and return its id. */
+  addSticky: (at: Point) => string;
+  toggleStickyCollapsed: (id: string) => void;
 
   // Grouping
   groupSelected: () => void;
@@ -875,6 +880,62 @@ export const useCanvasStore = create<CanvasState>()(
         el.y = targetY;
         el.bbox = getElementBBox(el);
       });
+    }),
+
+    // ── Sticky notes ───────────────────────────────────────────────────────
+    addSticky: (at) => {
+      const id = `sticky-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
+      const width = 180;
+      const height = 140;
+      const palette = STICKY_COLORS;
+      const noteColor = palette[Math.floor(Math.random() * palette.length)]!;
+
+      get().addElement({
+        id,
+        type: ShapeType.STICKY,
+        // Dropped centred on the click, the way a note lands where you point.
+        x: at.x - width / 2,
+        y: at.y - height / 2,
+        width,
+        height,
+        rotation: 0,
+        locked: false,
+        zIndex: Date.now(),
+        style: {
+          fill: noteColor, stroke: STICKY_INK, strokeWidth: 1,
+          opacity: 1, roughness: 0, strokeStyle: 'solid',
+        },
+        text: '',
+        noteColor,
+        collapsed: false,
+        fontSize: 16,
+        fontFamily: 'Inter, system-ui, sans-serif',
+      } as WhiteboardElement);
+
+      return id;
+    },
+
+    toggleStickyCollapsed: (id) => set((state) => {
+      const el = state.elements[id] as StickyElement | undefined;
+      if (el?.type !== ShapeType.STICKY) return;
+
+      if (el.collapsed) {
+        el.width = el.expandedWidth ?? 180;
+        el.height = el.expandedHeight ?? 140;
+        el.collapsed = false;
+      } else {
+        // Shrink the element itself, not just what gets drawn. Leaving the full
+        // size behind meant a collapsed note still reserved a note-sized hole
+        // on the board — its selection box stayed large and it kept blocking
+        // anything you drew underneath.
+        el.expandedWidth = Math.abs(el.width);
+        el.expandedHeight = Math.abs(el.height);
+        el.width = STICKY_DOT_SIZE;
+        el.height = STICKY_DOT_SIZE;
+        el.collapsed = true;
+      }
+
+      el.bbox = getElementBBox(el);
     }),
 
     // ── Grouping ───────────────────────────────────────────────────────────

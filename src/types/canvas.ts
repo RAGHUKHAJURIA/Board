@@ -14,11 +14,13 @@ export enum ShapeType {
   IMAGE = 'image',
   CONNECTOR = 'connector',
   ICON = 'icon',
+  STICKY = 'sticky',
 }
 
 export type Tool =
   | 'select'
   | 'lasso'
+  | 'sticky'
   | 'hand'
   | 'eraser'
   | 'laser'
@@ -126,6 +128,14 @@ export interface ConnectorElement extends BaseElement {
   curved?: boolean; // Deprecated, use routingMode
   label?: string;
   seed: number;
+  /**
+   * Head at each end. Both are settable, so a connector can be plain, one-way
+   * or double-headed. Names match `ARROWHEADS` in lib/canvas/arrowheads.
+   */
+  startArrowhead?: string | null;
+  endArrowhead?: string | null;
+  /** Font size for the label sitting on the line. */
+  labelFontSize?: number;
   startBindingGap?: number;
   endBindingGap?: number;
   startOffsetFromCenter?: { x: number; y: number };
@@ -139,7 +149,28 @@ export interface IconElement extends BaseElement {
   color: string;
 }
 
-export type WhiteboardElement = ShapeElement | FreehandElement | TextElement | ImageElement | ConnectorElement | IconElement;
+/**
+ * A sticky note. Collapses to a small dot on the canvas so a board can carry
+ * reminders without them covering the drawing; clicking the dot reopens it.
+ */
+export interface StickyElement extends BaseElement {
+  type: ShapeType.STICKY;
+  text: string;
+  /** Note paper colour. Text colour is derived for contrast. */
+  noteColor: string;
+  collapsed: boolean;
+  fontSize: number;
+  fontFamily: string;
+  /**
+   * Size to restore on expand. While collapsed the element's own width/height
+   * shrink to the dot, so it stops reserving the full note's space on the
+   * board — selection, hit testing and export all read those fields.
+   */
+  expandedWidth?: number;
+  expandedHeight?: number;
+}
+
+export type WhiteboardElement = ShapeElement | FreehandElement | TextElement | ImageElement | ConnectorElement | IconElement | StickyElement;
 
 export interface Viewport {
   x: number;

@@ -19,6 +19,7 @@ const SECTIONS: { title: string; items: [string, string][] }[] = [
       ['Arrow', 'A'],
       ['Draw', 'P'],
       ['Text', 'T'],
+      ['Sticky note', 'N'],
       ['Eraser', 'E'],
       ['Laser pointer', 'K'],
     ],

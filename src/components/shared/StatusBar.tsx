@@ -41,8 +41,15 @@ export function StatusBar() {
 
   return (
     <div
-      className="fixed left-1/2 -translate-x-1/2 z-40 bg-white/90 dark:bg-[#1a1a1e]/90 backdrop-blur-md border border-zinc-200 dark:border-zinc-800 p-1.5 rounded-xl shadow-lg flex items-center gap-2 max-w-[calc(100vw-32px)] overflow-x-auto no-scrollbar"
-      style={{ bottom: 'calc(16px + env(safe-area-inset-bottom, 0px))' }}
+      // Tucked into the bottom-left corner instead of floating across the
+      // middle of the canvas, where it sat on top of the drawing.
+      className="fixed left-3 z-40 bg-white/90 dark:bg-[#1a1a1e]/90 backdrop-blur-md border border-zinc-200 dark:border-zinc-800 p-1.5 rounded-xl shadow-lg flex items-center gap-2 max-w-[calc(100vw-24px)] overflow-x-auto no-scrollbar"
+      style={{ bottom: 'calc(12px + env(safe-area-inset-bottom, 0px))' }}
+      // The counts are no longer shown, but automated checks still need to see
+      // them; attributes keep that observable without cluttering the bar.
+      data-status-bar
+      data-elements={Object.keys(elements).length}
+      data-selected={selectedIds.size}
     >
       <div className="flex items-center gap-1 bg-zinc-100 dark:bg-zinc-900/50 rounded-lg p-0.5 px-2">
         <button
@@ -103,13 +110,6 @@ export function StatusBar() {
       >
         <Magnet size={14} />
       </button>
-
-      <div className="w-[1px] h-4 bg-zinc-200 dark:bg-zinc-800" />
-
-      <span className="text-[10px] uppercase tracking-wider text-zinc-500 font-semibold px-2">
-        {Object.keys(elements).length} Elements
-        {selectedIds.size > 0 && ` · ${selectedIds.size} selected`}
-      </span>
     </div>
   );
 }

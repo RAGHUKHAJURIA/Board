@@ -1,5 +1,6 @@
 import { ConnectorElement, Point, BaseElement, ShapeType } from '@/types';
 import { RoughRenderer } from './rough-renderer';
+import { getArrowheadShape, arrowheadSize, type Arrowhead } from './arrowheads';
 
 export type AnchorPoint = 'top' | 'right' | 'bottom' | 'left' | 'center';
 
@@ -299,7 +300,10 @@ export class ConnectorManager {
     connector: ConnectorElement,
     elementsMap: Map<string, BaseElement> | Record<string, BaseElement>,
     roughRenderer: RoughRenderer,
-    isSelected: boolean = false
+    isSelected: boolean = false,
+    /** Skip the label text — the inline editor is drawing it instead. The gap
+     *  in the line stays, so the editor sits in a hole rather than on the line. */
+    hideLabel: boolean = false
   ) {
     // ALWAYS resolve live positions from bound elements
     const path = this.computeConnectorPath(connector, elementsMap);
@@ -307,10 +311,64 @@ export class ConnectorManager {
   
     const mode = connector.routingMode || 'curved'; // Default to curved
     const style = connector.style;
-    
+
     ctx.save();
-    
-    if (mode === 'straight' && (!controlPoints || controlPoints.length === 0)) {
+
+    // ── Label geometry first: the line has to make room for it ────────────
+    // Measured before anything is drawn, because the label's box decides where
+    // the line stops and restarts.
+    const fontSize = connector.labelFontSize || 16;
+    const labelLines = connector.label ? connector.label.split('\n') : [];
+    const lineHeight = fontSize * 1.25;
+    let labelBox: { x: number; y: number; w: number; h: number } | null = null;
+    let labelMid = { x: (startX + endX) / 2, y: (startY + endY) / 2 };
+
+    if (labelLines.length > 0) {
+      ctx.font = `${fontSize}px Inter, sans-serif`;
+      const widest = Math.max(...labelLines.map((l) => ctx.measureText(l).width));
+      labelMid = this.getLabelAnchor(path, mode);
+      const padX = 8;
+      const padY = 3;
+      const h = labelLines.length * lineHeight;
+      labelBox = {
+        x: labelMid.x - widest / 2 - padX,
+        y: labelMid.y - h / 2 - padY,
+        w: widest + padX * 2,
+        h: h + padY * 2,
+      };
+    }
+
+    if (labelBox) {
+      // Draw the line as two runs that stop either side of the text. The old
+      // code punched the gap with globalCompositeOperation = 'destination-out',
+      // which erases the canvas *background* too — leaving a hole to the page
+      // behind it, i.e. the black rectangle behind the label.
+      const pts = this.samplePath(path, mode, 96);
+      const box = labelBox;
+      const inside = (p: Point) =>
+        p.x >= box.x && p.x <= box.x + box.w && p.y >= box.y && p.y <= box.y + box.h;
+
+      ctx.strokeStyle = style.stroke;
+      ctx.lineWidth = style.strokeWidth || 2;
+      ctx.lineCap = 'round';
+      if (style.strokeStyle === 'dashed') ctx.setLineDash([8, 8]);
+      else if (style.strokeStyle === 'dotted') ctx.setLineDash([2, 4]);
+      else ctx.setLineDash([]);
+
+      let run: Point[] = [];
+      const strokeRun = () => {
+        if (run.length < 2) return;
+        ctx.beginPath();
+        run.forEach((p, i) => (i === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y)));
+        ctx.stroke();
+      };
+      for (const p of pts) {
+        if (inside(p)) { strokeRun(); run = []; } else { run.push(p); }
+      }
+      strokeRun();
+      ctx.setLineDash([]);
+
+    } else if (mode === 'straight' && (!controlPoints || controlPoints.length === 0)) {
       // Draw straight arrow
       const options = {
         stroke: style.stroke,
@@ -348,39 +406,29 @@ export class ConnectorManager {
       ctx.setLineDash([]); // Reset
     }
   
-    // Draw label
-    if (connector.label) {
-      let mid = { x: (startX + endX) / 2, y: (startY + endY) / 2 };
-      if (mode === 'curved' && controlPoints && controlPoints.length >= 2) {
-        mid = this.getPointOnCurve(0.5, startX, startY, endX, endY, controlPoints);
-      } else if (mode === 'orthogonal' && controlPoints && controlPoints.length >= 2) {
-        mid = {
-          x: (controlPoints[0].x + controlPoints[1].x) / 2,
-          y: (controlPoints[0].y + controlPoints[1].y) / 2
-        };
-      }
-      
-      ctx.font = '18px Inter, sans-serif';
+    // Draw the label into the gap the line left for it.
+    if (labelBox && !hideLabel) {
+      ctx.font = `${fontSize}px Inter, sans-serif`;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
-      
-      // Draw a subtle background for the text
-      const metrics = ctx.measureText(connector.label);
-      const padding = 4;
-      const bgW = metrics.width + padding * 2;
-      const bgH = 18 + padding * 2;
-      ctx.fillStyle = 'rgba(0, 0, 0, 0.7)'; // fallback background
-      ctx.globalCompositeOperation = 'destination-out';
-      ctx.fillRect(mid.x - bgW / 2, mid.y - bgH / 2, bgW, bgH);
-      ctx.globalCompositeOperation = 'source-over';
-      
       ctx.fillStyle = style.stroke || '#ffffff';
-      ctx.fillText(connector.label, mid.x, mid.y);
+      const blockH = labelLines.length * lineHeight;
+      labelLines.forEach((line, i) => {
+        ctx.fillText(line, labelMid.x, labelMid.y - blockH / 2 + lineHeight * (i + 0.5));
+      });
     }
   
-    // Draw arrowhead — use tangent at end of curve for correct angle
-    const tangent = this.getTangentAtEnd(path);
-    this.drawArrowhead(ctx, endX, endY, tangent, connector);
+    // Heads at both ends. The start uses the reversed start tangent so the
+    // same geometry code points it outwards.
+    const endHead = (connector.endArrowhead ?? 'triangle') as Arrowhead;
+    const startHead = (connector.startArrowhead ?? 'none') as Arrowhead;
+
+    this.drawArrowhead(ctx, endX, endY, this.getTangentAtEnd(path), connector, endHead);
+
+    if (startHead !== 'none') {
+      const t = this.getTangentAtStart(path);
+      this.drawArrowhead(ctx, startX, startY, { x: -t.x, y: -t.y }, connector, startHead);
+    }
   
     // Draw handles if selected
     if (isSelected) {
@@ -434,30 +482,89 @@ export class ConnectorManager {
     ctx.restore();
   }
 
+  /** Where the label sits on the line. */
+  private getLabelAnchor(path: ConnectorPath, mode: string): Point {
+    const { startX, startY, endX, endY, controlPoints: cp } = path;
+    if (mode === 'curved' && cp && cp.length >= 2) {
+      return this.getPointOnCurve(0.5, startX, startY, endX, endY, cp);
+    }
+    if (mode === 'orthogonal' && cp && cp.length >= 2) {
+      return { x: (cp[0].x + cp[1].x) / 2, y: (cp[0].y + cp[1].y) / 2 };
+    }
+    return { x: (startX + endX) / 2, y: (startY + endY) / 2 };
+  }
+
+  /**
+   * The path as a dense polyline. Used to split the line around a label —
+   * one sampler covers straight, curved and orthogonal alike.
+   */
+  private samplePath(path: ConnectorPath, mode: string, n = 96): Point[] {
+    const { startX, startY, endX, endY, controlPoints: cp } = path;
+    const pts: Point[] = [];
+
+    if (mode === 'curved' && cp && cp.length >= 2) {
+      for (let i = 0; i <= n; i++) {
+        const t = i / n;
+        const mt = 1 - t;
+        pts.push({
+          x: mt ** 3 * startX + 3 * mt ** 2 * t * cp[0].x + 3 * mt * t ** 2 * cp[1].x + t ** 3 * endX,
+          y: mt ** 3 * startY + 3 * mt ** 2 * t * cp[0].y + 3 * mt * t ** 2 * cp[1].y + t ** 3 * endY,
+        });
+      }
+      return pts;
+    }
+
+    const corners: Point[] =
+      mode === 'orthogonal' && cp && cp.length >= 2
+        ? [{ x: startX, y: startY }, cp[0]!, cp[1]!, { x: endX, y: endY }]
+        : [{ x: startX, y: startY }, { x: endX, y: endY }];
+
+    const per = Math.max(2, Math.floor(n / (corners.length - 1)));
+    for (let s = 0; s < corners.length - 1; s++) {
+      const a = corners[s]!;
+      const b = corners[s + 1]!;
+      for (let i = 0; i < per; i++) {
+        const t = i / per;
+        pts.push({ x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t });
+      }
+    }
+    pts.push({ x: endX, y: endY });
+    return pts;
+  }
+
   private drawArrowhead(
     ctx: CanvasRenderingContext2D,
     x: number, y: number,
     tangent: {x: number, y: number},
-    connector: ConnectorElement
+    connector: ConnectorElement,
+    type: Arrowhead
   ) {
-    const size = 15;
-    const angle = Math.atan2(tangent.y, tangent.x);
+    const strokeWidth = connector.style.strokeWidth || 2;
+    const shape = getArrowheadShape(
+      type,
+      x, y,
+      Math.atan2(tangent.y, tangent.x),
+      arrowheadSize(strokeWidth)
+    );
+    if (!shape) return;
+
     ctx.save();
     ctx.fillStyle = connector.style.stroke ?? '#000';
     ctx.strokeStyle = connector.style.stroke ?? '#000';
-    ctx.lineWidth = connector.style.strokeWidth || 2;
+    ctx.lineWidth = strokeWidth;
+    ctx.lineJoin = 'round';
+    ctx.lineCap = 'round';
+    ctx.setLineDash([]);   // a dashed line must not produce a dashed head
+
     ctx.beginPath();
-    ctx.moveTo(x, y);
-    ctx.lineTo(
-      x - size * Math.cos(angle - Math.PI / 6),
-      y - size * Math.sin(angle - Math.PI / 6)
-    );
-    ctx.lineTo(
-      x - size * Math.cos(angle + Math.PI / 6),
-      y - size * Math.sin(angle + Math.PI / 6)
-    );
-    ctx.closePath();
-    ctx.fill();
+    if (shape.circle) {
+      ctx.arc(shape.circle.cx, shape.circle.cy, shape.circle.r, 0, Math.PI * 2);
+    } else {
+      shape.points.forEach((p, i) => (i === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y)));
+      if (shape.closed) ctx.closePath();
+    }
+
+    if (shape.filled) ctx.fill();
     ctx.stroke();
     ctx.restore();
   }

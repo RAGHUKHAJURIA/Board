@@ -116,6 +116,9 @@ export function useKeyboardShortcuts() {
           case 'q':
             e.preventDefault(); setTool('lasso');
             break;
+          case 'n':
+            e.preventDefault(); setTool('sticky');
+            break;
           case 'escape':
             e.preventDefault();
             clearSelection();

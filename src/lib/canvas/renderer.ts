@@ -1,5 +1,5 @@
 import rough from 'roughjs';
-import { WhiteboardElement, Viewport, ShapeType, GridSettings, ImageElement, TextElement, ConnectorElement, ShapeElement } from '@/types';
+import { WhiteboardElement, Viewport, ShapeType, GridSettings, ImageElement, TextElement, ConnectorElement, ShapeElement, StickyElement } from '@/types';
 import { renderShape } from './shapes';
 import { renderFreehand } from './freehand';
 import { ImageHandler } from './image-handler';
@@ -7,6 +7,7 @@ import { ConnectorManager } from './connectors';
 import { RoughRenderer } from './rough-renderer';
 import { drawIconElement, getIconBitmapSync, getIconBitmap } from './icon-renderer';
 import { layoutText, measureLine, fontString, FONT_FAMILIES } from './text';
+import { renderSticky } from './sticky';
 
 // These were re-allocated on every frame — 240 throwaway objects a second at
 // 60fps, all of them stateless. Cache them per canvas node instead.
@@ -60,7 +61,13 @@ export const renderCanvas = (
   viewport: Viewport,
   grid: GridSettings,
   canvasBackground: string = '#1e1e1e',
-  erasePreview?: ErasePreview
+  erasePreview?: ErasePreview,
+  /**
+   * Element currently open in the inline text editor. Its text is left
+   * unpainted so the editor is the only copy on screen — drawing both showed
+   * the text twice, slightly offset.
+   */
+  editingId?: string | null
 ): boolean => {
   const ctx = canvas.getContext('2d');
   if (!ctx) return false;
@@ -147,15 +154,21 @@ export const renderCanvas = (
       }
     }
 
+    const isEditing = editingId != null && element.id === editingId;
+
     if (element.type === ShapeType.FREEHAND) {
       renderFreehand(ctx, element);
     } else if (element.type === ShapeType.IMAGE) {
       if (!imageHandler.drawImage(ctx, element as ImageElement)) assetsPending = true;
+    } else if (element.type === ShapeType.STICKY) {
+      // The paper still draws; only its text is left to the editor.
+      renderSticky(ctx, element as StickyElement, isEditing);
+
     } else if (element.type === ShapeType.TEXT) {
-      renderText(ctx, element as TextElement, elementsMap);
+      if (!isEditing) renderText(ctx, element as TextElement, elementsMap);
 
     } else if (element.type === ShapeType.CONNECTOR) {
-      connectorManager.drawConnector(ctx, element as ConnectorElement, elementsMap, roughRenderer, selectedIds.has(element.id));
+      connectorManager.drawConnector(ctx, element as ConnectorElement, elementsMap, roughRenderer, selectedIds.has(element.id), isEditing);
       if (selectedIds.has(element.id)) {
         drawConnectorHandles(ctx, element as ConnectorElement, viewport.zoom);
       }

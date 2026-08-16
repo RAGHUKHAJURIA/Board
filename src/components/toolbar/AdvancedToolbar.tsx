@@ -31,6 +31,7 @@ import {
   Plus,
   Highlighter,
   Lasso,
+  StickyNote,
 } from 'lucide-react';
 import { ShapeType } from '@/types';
 
@@ -41,17 +42,21 @@ function PenPanel({
   penType,
   stroke,
   variability,
+  strokeWidth,
   onPenType,
   onColor,
   onVariability,
+  onStrokeWidth,
   onClose,
 }: {
   penType: string;
   stroke: string;
   variability: 'variable' | 'constant';
+  strokeWidth: number;
   onPenType: (p: string) => void;
   onColor: (c: string) => void;
   onVariability: (v: 'variable' | 'constant') => void;
+  onStrokeWidth: (w: number) => void;
   onClose: () => void;
 }) {
   return (
@@ -90,8 +95,47 @@ function PenPanel({
 
       <div className="w-full h-px bg-zinc-200 dark:bg-zinc-700 mb-3" />
 
+      {/* Size — set before you start writing, not only after selecting a stroke */}
+      <div className="flex items-center justify-between mb-2">
+        <span className="text-[11px] font-semibold text-zinc-500 uppercase tracking-wider">Size</span>
+        <span className="text-[10px] text-zinc-400 tabular-nums">{strokeWidth}px</span>
+      </div>
+      <div className="flex items-center gap-2 mb-2">
+        {[1, 2, 4, 8, 16].map((w) => (
+          <button
+            key={w}
+            onClick={(e) => { e.stopPropagation(); onStrokeWidth(w); }}
+            title={`${w}px`}
+            className={`flex-1 h-8 rounded-md flex items-center justify-center transition-colors ${
+              strokeWidth === w
+                ? 'bg-foreground'
+                : 'border border-zinc-300 dark:border-zinc-700 hover:bg-zinc-100 dark:hover:bg-zinc-800'
+            }`}
+          >
+            {/* The swatch is the actual thickness, so the choice is visual */}
+            <span
+              className={`block rounded-full ${strokeWidth === w ? 'bg-background' : 'bg-foreground'}`}
+              style={{ width: '60%', height: `${Math.min(w, 12)}px` }}
+            />
+          </button>
+        ))}
+      </div>
+      <input
+        type="range"
+        min={1}
+        max={32}
+        step={1}
+        value={strokeWidth}
+        onChange={(e) => { e.stopPropagation(); onStrokeWidth(parseInt(e.target.value, 10)); }}
+        onPointerDown={(e) => e.stopPropagation()}
+        className="accent-foreground w-full mb-3"
+        aria-label="Stroke width"
+      />
+
+      <div className="w-full h-px bg-zinc-200 dark:bg-zinc-700 mb-3" />
+
       {/* Width variability */}
-      <div className="text-[11px] font-semibold text-zinc-500 uppercase tracking-wider mb-2">Stroke width</div>
+      <div className="text-[11px] font-semibold text-zinc-500 uppercase tracking-wider mb-2">Stroke style</div>
       <div className="flex gap-1.5 mb-3">
         {([
           { id: 'variable' as const, label: 'Variable', hint: 'Tapers with pressure' },
@@ -513,6 +557,17 @@ export function AdvancedToolbar() {
     });
   };
 
+  // Sets the width for the next stroke, and applies it to anything selected —
+  // same contract as the colour swatches.
+  const handleStrokeWidthChange = (w: number) => {
+    updateCurrentStyle({ strokeWidth: w });
+    const { selectedIds, elements } = useCanvasStore.getState();
+    selectedIds.forEach((id) => {
+      const el = elements[id];
+      if (el) updateElement(id, { style: { ...el.style, strokeWidth: w } });
+    });
+  };
+
   const tools = [
     { id: 'select', icon: MousePointer, label: 'Select (V)' },
     { id: 'lasso', icon: Lasso, label: 'Lasso select (Q)' },
@@ -528,6 +583,7 @@ export function AdvancedToolbar() {
     { id: ShapeType.TEXT, icon: Type, label: 'Text (T)' },
     { id: ShapeType.IMAGE, icon: ImageIcon, label: 'Image' },
     { id: 'icon-picker', icon: Plus, label: 'Icons' },
+    { id: 'sticky', icon: StickyNote, label: 'Sticky note (N)' },
     { id: 'eraser', icon: Eraser, label: 'Eraser (E)' },
     { id: 'laser', icon: Highlighter, label: 'Laser pointer (K)' },
   ];
@@ -636,9 +692,11 @@ export function AdvancedToolbar() {
           penType={penType}
           stroke={currentStyle.stroke}
           variability={currentStyle.strokeVariability ?? 'variable'}
+          strokeWidth={currentStyle.strokeWidth ?? 2}
           onPenType={(pt) => { updateCurrentStyle({ penType: pt as 'pen' | 'pencil' | 'fountain' | 'marker' | 'highlighter' }); setTool(ShapeType.FREEHAND); }}
           onColor={(c) => { handleColorChange(c); setTool(ShapeType.FREEHAND); }}
           onVariability={(v) => { updateCurrentStyle({ strokeVariability: v }); setTool(ShapeType.FREEHAND); }}
+          onStrokeWidth={handleStrokeWidthChange}
           onClose={() => setOpenPanel(null)}
         />
       )}

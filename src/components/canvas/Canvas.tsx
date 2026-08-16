@@ -5,9 +5,10 @@ import { useCanvasStore } from '@/store/canvas-store';
 import { useUIStore } from '@/store/ui-store';
 import { renderCanvas, type ErasePreview } from '@/lib/canvas/renderer';
 import { renderFreehand } from '@/lib/canvas/freehand';
-import { Point, ShapeType, WhiteboardElement, FreehandElement, ShapeElement, TextElement, ConnectorElement, ImageElement, BoundingBox } from '@/types';
+import { Point, ShapeType, WhiteboardElement, FreehandElement, ShapeElement, TextElement, ConnectorElement, ImageElement, StickyElement, BoundingBox } from '@/types';
 import { isPointInBox, getElementBBox } from '@/lib/utils/geometry';
 import { computeSnap, drawGuides, type SmartGuide } from '@/lib/canvas/smart-guides';
+import { hitStickyClose, hitStickyDot, STICKY_INK } from '@/lib/canvas/sticky';
 import { getLassoSelectedIds, drawLassoPath } from '@/lib/canvas/lasso';
 import { SelectionBox } from './SelectionBox';
 import { IconPicker } from './IconPicker';
@@ -30,7 +31,7 @@ import { getDeviceCapabilities } from '@/lib/input/device-detection';
 import { createActiveStroke, clearStrokeTimeout, type ActiveStroke, type CompletionReason } from '@/lib/canvas/stroke-state';
 import { LaserTrail } from '@/lib/canvas/laser';
 import { FREEDRAW } from '@/lib/canvas/freehand';
-import { layoutText, FONT_FAMILIES } from '@/lib/canvas/text';
+import { layoutText, measureLine, FONT_FAMILIES } from '@/lib/canvas/text';
 import { PenCursor } from './PenCursor';
 
 const NO_ERASE_PREVIEW: ErasePreview = { faded: new Set(), hidden: new Set() };
@@ -124,6 +125,9 @@ export function Canvas() {
   const activeGuidesRef = useRef<SmartGuide[]>([]);
   // Element under the cursor with the select tool, for the hover outline.
   const hoveredElementRef = useRef<string | null>(null);
+  // A click (not a drag) that landed on an open sticky note — resolved on
+  // pointerup, so the note can still be dragged by its body.
+  const stickyClickRef = useRef<{ id: string; x: number; y: number } | null>(null);
   const resizeHandleRef = useRef<ResizeHandle | null>(null);
   const resizeStartBounds = useRef<{ x: number; y: number; width: number; height: number } | null>(null);
   const resizeGroupStartBounds = useRef<{ x: number; y: number; width: number; height: number } | null>(null);
@@ -756,7 +760,7 @@ export function Canvas() {
       laserPointerRef.current = e.pointerId;
       laserRef.current.clear();
       const w = worldFromEvent(e);
-      laserRef.current.add(w.x, w.y);
+      laserRef.current.add(w.x, w.y, store.viewport.zoom);
     }
 
     function handleNativeLaserMove(e: PointerEvent) {
@@ -765,7 +769,7 @@ export function Canvas() {
       e.preventDefault();
       const vp = useCanvasStore.getState().viewport;
       for (const [x, y] of extractRawCoalescedPoints(e, canvas, vp)) {
-        laserRef.current.add(x, y);
+        laserRef.current.add(x, y, vp.zoom);
       }
     }
 
@@ -1214,7 +1218,8 @@ export function Canvas() {
         viewport,
         grid,
         canvasBackground,
-        erasePreviewRef.current
+        erasePreviewRef.current,
+        textEditingId
       );
       // An image or icon bitmap is still decoding — try again next frame.
       if (assetsPending) dirtyRef.current = true;
@@ -1325,7 +1330,7 @@ export function Canvas() {
 
     render();
     return () => cancelAnimationFrame(frameId);
-  }, [elements, selectedIds, viewport, grid, selectionBox, canvasBackground, resolvedTheme, clearOverlay, hoveredBindTarget]);
+  }, [elements, selectedIds, viewport, grid, selectionBox, canvasBackground, resolvedTheme, clearOverlay, hoveredBindTarget, textEditingId]);
 
   // Screen → world
   const screenToWorld = (sx: number, sy: number): Point => ({
@@ -1394,6 +1399,46 @@ export function Canvas() {
     const world = screenToWorld(e.clientX, e.clientY);
     lastPointerPos.current = screen;
     lastPointerWorldPos.current = world;
+
+    // Sticky note tool → drop a note here and start typing in it.
+    if (tool === 'sticky') {
+      const id = useCanvasStore.getState().addSticky(world);
+      selectElements([id]);
+      setTool('select');
+      const note = useCanvasStore.getState().elements[id];
+      if (note) openTextEditor(note as StickyElement);
+      return;
+    }
+
+    // A sticky's own controls come before generic selection, so clicking the ×
+    // or a collapsed dot acts on the note instead of just selecting it.
+    if (tool === 'select') {
+      const sorted = Object.values(elements)
+        .filter((el): el is StickyElement => el.type === ShapeType.STICKY && !el.locked)
+        .sort((a, b) => b.zIndex - a.zIndex);
+      for (const note of sorted) {
+        if (hitStickyClose(note, world) || hitStickyDot(note, world)) {
+          useCanvasStore.getState().toggleStickyCollapsed(note.id);
+          selectElements([note.id]);
+          return;
+        }
+      }
+
+      // Clicking the body of an open note starts writing in it. Recorded here
+      // and acted on at pointerup only if the pointer didn't move, so dragging
+      // the note by its paper still works.
+      const bodyHit = sorted.find(
+        (note) =>
+          !note.collapsed &&
+          world.x >= note.x && world.x <= note.x + Math.abs(note.width) &&
+          world.y >= note.y && world.y <= note.y + Math.abs(note.height)
+      );
+      stickyClickRef.current = bodyHit
+        ? { id: bodyHit.id, x: e.clientX, y: e.clientY }
+        : null;
+    } else {
+      stickyClickRef.current = null;
+    }
 
     // Image tool -> trigger file upload
     if (tool === ShapeType.IMAGE) {
@@ -2037,6 +2082,24 @@ export function Canvas() {
       connectorEndpointRef.current = null;
     }
 
+    // A press and release on an open note, with no drag in between, means
+    // "write in it" — no second click needed.
+    const stickyClick = stickyClickRef.current;
+    stickyClickRef.current = null;
+    if (stickyClick) {
+      const moved = Math.hypot(e.clientX - stickyClick.x, e.clientY - stickyClick.y);
+      if (moved < 4) {
+        const note = useCanvasStore.getState().elements[stickyClick.id];
+        if (note?.type === ShapeType.STICKY) {
+          selectElements([note.id]);
+          openTextEditor(note as StickyElement);
+          setMode('idle');
+          setIsInteracting(false);
+          return;
+        }
+      }
+    }
+
     if (prevMode === 'dragging') {
       // Save snapshot after move
       saveSnapshot();
@@ -2143,8 +2206,12 @@ export function Canvas() {
       if (selectedArray.length === 1 && selectedArray[0].type === ShapeType.CONNECTOR) {
          const conn = selectedArray[0] as ConnectorElement;
          const handleHit = hitTestConnectorHandles(world.x, world.y, elements, [conn.id], viewport.zoom);
-         
-         if (handleHit?.handleType === 'midpoint') {
+
+         // Double-clicking the midpoint resets a manual reshape — but only if
+         // there is a reshape to undo. The midpoint handle sits exactly where
+         // you double-click to label an arrow, so on an ordinary connector this
+         // branch was swallowing the gesture and no label could ever be added.
+         if (handleHit?.handleType === 'midpoint' && conn.isManuallyRouted) {
              useCanvasStore.getState().setActiveHandle(null);
              updateElement(conn.id, { isManuallyRouted: false, controlPoints: undefined, routingMode: 'curved' });
              return;
@@ -2158,6 +2225,27 @@ export function Canvas() {
         if (el.type === ShapeType.TEXT) {
           selectElements([el.id]);
           openTextEditor(el as TextElement);
+          return;
+        }
+
+        // An arrow/connector carries its label on the line itself, not as a
+        // separate bound element — double-click writes in the middle of it.
+        if (el.type === ShapeType.CONNECTOR) {
+          selectElements([el.id]);
+          openTextEditor(el as ConnectorElement);
+          return;
+        }
+
+        if (el.type === ShapeType.STICKY) {
+          const note = el as StickyElement;
+          // Double-clicking a collapsed note opens it rather than editing text
+          // you cannot see.
+          if (note.collapsed) {
+            useCanvasStore.getState().toggleStickyCollapsed(note.id);
+            return;
+          }
+          selectElements([note.id]);
+          openTextEditor(note);
           return;
         }
 
@@ -2223,11 +2311,19 @@ export function Canvas() {
   };
 
   // --- Text editing helpers ---
-  const openTextEditor = (el: TextElement | ConnectorElement) => {
+  const openTextEditor = (
+    el: TextElement | ConnectorElement | StickyElement,
+    /** False re-lays-out an already-open editor without touching the caret. */
+    takeFocus = true
+  ) => {
     setTextEditingId(el.id);
     setMode('text-editing');
 
-    let screenX, screenY, screenW, screenH, fontSize, fontFamily, color, text;
+    let screenX: number, screenY: number, screenW: number, screenH: number;
+    let fontSize: number, fontFamily: string, color: string, text: string;
+    // Defaults match the plain text renderer; each branch overrides as needed.
+    let lineHeight = 1.4;
+    let textAlign: 'left' | 'center' | 'right' = 'left';
 
     if (el.type === ShapeType.TEXT) {
       // A bound label is edited over its container, where it is drawn.
@@ -2249,48 +2345,111 @@ export function Canvas() {
       fontFamily = el.fontFamily || FONT_FAMILIES[0].value;
       color = el.color || el.style.stroke;
       text = el.text;
+      textAlign = container ? 'center' : (el.textAlign ?? 'left');
+    } else if (el.type === ShapeType.STICKY) {
+      // Edit in place, inside the paper, with the note's own padding.
+      const pad = 12;
+      screenX = (el.x + pad) * viewport.zoom + viewport.x;
+      screenY = (el.y + pad) * viewport.zoom + viewport.y;
+      screenW = (Math.abs(el.width) - pad * 2) * viewport.zoom;
+      screenH = (Math.abs(el.height) - pad * 2) * viewport.zoom;
+      fontSize = el.fontSize || 16;
+      fontFamily = el.fontFamily;
+      color = STICKY_INK;
+      text = el.text;
+      lineHeight = 1.35;   // matches LINE_RATIO in sticky.ts
     } else if (el.type === ShapeType.CONNECTOR) {
       const manager = new ConnectorManager();
       const resolved = manager.resolveConnectorEndpoints(el, useCanvasStore.getState().getElementsMap());
       const mid = manager.getPointOnCurve(0.5, resolved.startX, resolved.startY, resolved.endX, resolved.endY, el.controlPoints);
-      screenX = mid.x * viewport.zoom + viewport.x - 50; // offset for centering roughly
-      screenY = mid.y * viewport.zoom + viewport.y - 20;
-      screenW = 100;
-      screenH = 40;
-      fontSize = 18;
+
+      fontSize = el.labelFontSize || 16;
       fontFamily = 'Inter, sans-serif';
+      lineHeight = 1.25;   // matches the connector label renderer
+      textAlign = 'center';
       color = el.style.stroke;
       text = el.label || '';
+
+      // Sized to the text and centred on the line, rather than a fixed 100×40
+      // box hung off the midpoint — that box was the rectangle you could see,
+      // and it wrapped short labels onto two lines.
+      const lines = (text || ' ').split('\n');
+      const widest = Math.max(
+        40,
+        ...lines.map((l) => measureLine(l || ' ', fontSize, fontFamily))
+      );
+      const blockH = lines.length * fontSize * lineHeight;
+      screenW = (widest + 12) * viewport.zoom;
+      screenH = blockH * viewport.zoom;
+      screenX = mid.x * viewport.zoom + viewport.x - screenW / 2;
+      screenY = mid.y * viewport.zoom + viewport.y - screenH / 2;
     } else {
       return;
     }
 
+    // The editor has to be invisible furniture sitting exactly where the text
+    // is drawn: same font, size, colour, line height and origin, no border, no
+    // padding of its own. Anything else and the text appears to jump when you
+    // start and stop editing.
     setTextEditorStyle({
       position: 'fixed',
       left: screenX,
       top: screenY,
       width: screenW,
-      minHeight: screenH,
+      height: screenH,
       fontSize: fontSize * viewport.zoom,
-      fontFamily: fontFamily,
-      color: color,
+      fontFamily,
+      color,
       background: 'transparent',
-      border: '2px solid var(--foreground)',
+      border: 'none',
       outline: 'none',
       resize: 'none',
-      padding: '4px',
+      padding: 0,
+      margin: 0,
+      overflow: 'hidden',
       zIndex: 9999,
-      borderRadius: '4px',
-      lineHeight: 1.4,
+      lineHeight,
+      textAlign,
+      whiteSpace: 'pre-wrap',
+      // Caret only — the selection highlight would otherwise be the only thing
+      // separating the editor from the drawing.
+      caretColor: color,
     });
 
+    if (!takeFocus) return;
+
     setTimeout(() => {
-      if (textAreaRef.current) {
-        textAreaRef.current.value = text;
-        textAreaRef.current.focus();
-        textAreaRef.current.select();
-      }
+      const ta = textAreaRef.current;
+      if (!ta) return;
+      ta.value = text;
+      ta.focus();
+      // Caret at the end, not select-all: selecting the existing text meant the
+      // first character typed replaced the whole note instead of adding to it.
+      const end = ta.value.length;
+      ta.setSelectionRange(end, end);
     }, 10);
+  };
+
+  /**
+   * Push each keystroke onto the element so the drawing keeps up with the
+   * editor: an arrow's gap opens as the label grows, and a note reflows as you
+   * type. Writes bypass history — one undo step is added on commit.
+   */
+  const handleTextEditorInput = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+    if (!textEditingId) return;
+    const value = e.target.value;
+    const el = useCanvasStore.getState().elements[textEditingId];
+    if (!el) return;
+
+    if (el.type === ShapeType.CONNECTOR) {
+      updateElement(textEditingId, { label: value });
+      // The gap is measured from the label, so the editor has to keep pace as
+      // the text grows. Re-laid out without stealing the caret.
+      const fresh = useCanvasStore.getState().elements[textEditingId];
+      if (fresh) openTextEditor(fresh as ConnectorElement, false);
+    } else if (el.type === ShapeType.STICKY) {
+      updateElement(textEditingId, { text: value });
+    }
   };
 
   const commitTextEdit = () => {
@@ -2304,6 +2463,10 @@ export function Canvas() {
 
     if (el.type === ShapeType.CONNECTOR) {
       updateElement(textEditingId, { label: textValue });
+      saveSnapshot();
+    } else if (el.type === ShapeType.STICKY) {
+      // An empty note is still a note — it keeps its place on the board.
+      updateElement(textEditingId, { text: textValue });
       saveSnapshot();
     } else if (textValue.trim() === '') {
       deleteElements([textEditingId]);
@@ -2575,6 +2738,7 @@ export function Canvas() {
           ref={textAreaRef}
           style={textEditorStyle}
           onBlur={commitTextEdit}
+          onChange={handleTextEditorInput}
           onKeyDown={(e) => {
             if (e.key === 'Escape') {
               e.preventDefault();
@@ -2582,7 +2746,8 @@ export function Canvas() {
             }
             e.stopPropagation(); // Prevent keyboard shortcuts from firing
           }}
-          placeholder="Type here..."
+          // No placeholder: the editor sits on the drawing, so ghost text there
+          // reads as content that is already on the board.
         />
       )}
 

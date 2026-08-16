@@ -8,8 +8,9 @@ import { useCanvasStore } from '@/store/canvas-store';
 import { useUIStore } from '@/store/ui-store';
 import { exportToPNG, copyPNGToClipboard } from '@/lib/export/png';
 import { downloadSVG } from '@/lib/export/svg';
+import { downloadOfflineHtml } from '@/lib/export/offline';
 
-type Format = 'png' | 'svg';
+type Format = 'png' | 'svg' | 'html';
 
 export function ExportDialog({ onClose }: { onClose: () => void }) {
   const elements = useCanvasStore((s) => s.elements);
@@ -49,13 +50,22 @@ export function ExportDialog({ onClose }: { onClose: () => void }) {
           transparent: !withBackground,
           filename: `drawer-${stamp}.png`,
         });
-      } else {
+      } else if (format === 'svg') {
         await downloadSVG(
           {
             elements: exported,
             background: withBackground ? canvasBackground : 'transparent',
           },
           `drawer-${stamp}.svg`
+        );
+      } else {
+        await downloadOfflineHtml(
+          {
+            elements: exported,
+            background: withBackground ? canvasBackground : 'transparent',
+            title: `Drawer board — ${stamp}`,
+          },
+          `drawer-${stamp}.html`
         );
       }
       onClose();
@@ -98,12 +108,18 @@ export function ExportDialog({ onClose }: { onClose: () => void }) {
 
         <Section label="Format">
           <div className="flex gap-2">
-            {(['png', 'svg'] as Format[]).map((f) => (
+            {(['png', 'svg', 'html'] as Format[]).map((f) => (
               <Choice key={f} active={format === f} onClick={() => setFormat(f)}>
                 {f.toUpperCase()}
               </Choice>
             ))}
           </div>
+          {format === 'html' && (
+            <p className="mt-2 text-[11px] text-zinc-500">
+              One self-contained file. Open it offline in any browser to pan and
+              zoom your board; the scene data rides along inside it.
+            </p>
+          )}
         </Section>
 
         {format === 'png' && (
