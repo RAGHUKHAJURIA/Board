@@ -265,7 +265,7 @@ export function PropertiesPanel() {
             <>
               <div className="flex flex-col gap-1">
                 <div className="flex justify-between text-[10px] text-zinc-500 dark:text-zinc-400">
-                  <span>Font Size</span><span>{(element as TextElement).fontSize || 18}px</span>
+                  <span>Font Size</span><span>{Math.round((element as TextElement).fontSize || 18)}px</span>
                 </div>
                 <input
                   type="range" min="8" max="96" step="1"

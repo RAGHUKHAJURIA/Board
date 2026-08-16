@@ -132,7 +132,7 @@ export function Canvas() {
   const resizeStartBounds = useRef<{ x: number; y: number; width: number; height: number } | null>(null);
   const resizeGroupStartBounds = useRef<{ x: number; y: number; width: number; height: number } | null>(null);
   const activeGroupBounds = useRef<{ x: number; y: number; width: number; height: number } | null>(null);
-  const resizeElementStartBoundsRef = useRef<Record<string, { x: number; y: number; width: number; height: number; type: string; controlPoints?: { x: number; y: number }[] }>>({});
+  const resizeElementStartBoundsRef = useRef<Record<string, { x: number; y: number; width: number; height: number; type: string; controlPoints?: { x: number; y: number }[]; fontSize?: number }>>({});
   const resizeElementIdRef = useRef<string | null>(null);
   const rotateStartAngle = useRef<number>(0);
   const rotateCenter = useRef<Point>({ x: 0, y: 0 });
@@ -1803,6 +1803,16 @@ export function Canvas() {
                 y: newGb.y + (cp.y - startGb.y) * scaleY,
               }));
             }
+
+            // Text in a multi-selection scales its glyphs too, so it doesn't
+            // sit at its original size inside a group that grew around it.
+            if (startEl.type === ShapeType.TEXT && startEl.fontSize) {
+              const uniform = Math.min(Math.abs(scaleX), Math.abs(scaleY));
+              (updates as Partial<TextElement>).fontSize = Math.round(
+                Math.max(4, Math.min(400, startEl.fontSize * uniform))
+              );
+            }
+
             updateElement(id, updates);
             movedIds.push(id);
           });
@@ -1813,6 +1823,36 @@ export function Canvas() {
 
         const el = useCanvasStore.getState().elements[elId];
         if (!el) break;
+
+        // Text scales its glyphs, not its box. Resizing used to only stretch
+        // the bounding box, leaving the letters at their original size inside
+        // an ever-larger empty rectangle.
+        if (el.type === ShapeType.TEXT) {
+          const textEl = el as TextElement;
+          const oldH = Math.abs(textEl.height) || 1;
+          // Always proportional: a text box has no meaning apart from the text
+          // in it, so stretching one axis alone would just distort the metrics.
+          const nb = calcResizedBounds(handle, el.x, el.y, el.width, el.height, wdx, wdy, true);
+          const scale = Math.abs(nb.height) / oldH;
+          // Whole pixels: a font size carried to 13 decimal places is noise
+          // that ends up on screen in the properties panel.
+          const nextFont = Math.round(
+            Math.max(4, Math.min(400, (textEl.fontSize || 18) * scale))
+          );
+
+          const container = textEl.containerId ? useCanvasStore.getState().elements[textEl.containerId] : undefined;
+          const { width, height } = layoutText({ ...textEl, fontSize: nextFont }, container);
+
+          updateElement(elId, {
+            x: nb.x,
+            y: nb.y,
+            fontSize: nextFont,
+            // Box follows the glyphs, so the selection frame stays honest.
+            width: container ? Math.abs(container.width) : width,
+            height,
+          });
+          break;
+        }
 
         const preserveRatio = e.shiftKey || (el.type === ShapeType.IMAGE && (el as ImageElement).lockAspectRatio) || el.type === ShapeType.ICON;
         const newBounds = calcResizedBounds(handle, el.x, el.y, el.width, el.height, wdx, wdy, preserveRatio);
@@ -2681,7 +2721,7 @@ export function Canvas() {
             } else {
               resizeElementIdRef.current = 'group';
               let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-              const startBounds: Record<string, { x: number; y: number; width: number; height: number; type: string; controlPoints?: { x: number; y: number }[] }> = {};
+              const startBounds: Record<string, { x: number; y: number; width: number; height: number; type: string; controlPoints?: { x: number; y: number }[]; fontSize?: number }> = {};
               selectedArray.forEach(el => {
                 minX = Math.min(minX, el.x);
                 minY = Math.min(minY, el.y);
@@ -2692,8 +2732,10 @@ export function Canvas() {
                   y: el.y, 
                   width: el.width, 
                   height: el.height, 
-                  type: el.type, 
-                  controlPoints: el.type === ShapeType.CONNECTOR ? (el as ConnectorElement).controlPoints : undefined 
+                  type: el.type,
+                  controlPoints: el.type === ShapeType.CONNECTOR ? (el as ConnectorElement).controlPoints : undefined,
+                  // Needed to scale glyphs with the group, not just the box.
+                  fontSize: el.type === ShapeType.TEXT ? (el as TextElement).fontSize : undefined,
                 };
               });
               const gb = { x: minX, y: minY, width: maxX - minX, height: maxY - minY };

@@ -32,6 +32,7 @@ import {
   Highlighter,
   Lasso,
   StickyNote,
+  PenTool,
 } from 'lucide-react';
 import { ShapeType } from '@/types';
 
@@ -568,6 +569,14 @@ export function AdvancedToolbar() {
     });
   };
 
+  // Pen mode lives in the toolbar as a single on/off button. It used to be a
+  // two-button widget floating over the bottom-right of the canvas, which is
+  // exactly the space a tablet has least of.
+  const inputMode = useCanvasStore((state) => state.inputMode);
+  const toggleInputMode = useCanvasStore((state) => state.toggleInputMode);
+  const isPenMode = inputMode.mode === 'pen';
+  const showsPenMode = inputMode.isTouchDevice || inputMode.isTablet;
+
   const tools = [
     { id: 'select', icon: MousePointer, label: 'Select (V)' },
     { id: 'lasso', icon: Lasso, label: 'Lasso select (Q)' },
@@ -586,6 +595,19 @@ export function AdvancedToolbar() {
     { id: 'sticky', icon: StickyNote, label: 'Sticky note (N)' },
     { id: 'eraser', icon: Eraser, label: 'Eraser (E)' },
     { id: 'laser', icon: Highlighter, label: 'Laser pointer (K)' },
+    // Touch devices only — on a mouse-driven machine there is nothing to gate.
+    ...(showsPenMode
+      ? [
+          null,
+          {
+            id: 'penmode',
+            icon: PenTool,
+            label: isPenMode
+              ? 'Pen mode on — only the stylus draws'
+              : 'Pen mode off — finger draws',
+          },
+        ]
+      : []),
   ];
 
   // Remember which shape the picker last used, so its button keeps that icon.
@@ -625,17 +647,26 @@ export function AdvancedToolbar() {
 
     const Icon = t.icon;
 
-    // For icon picker, it's not a persistent "tool" in the same way, but it behaves like an open modal
-    const isActive = t.id === 'icon-picker' ? isIconPickerOpen : tool === t.id;
+    // Neither the icon picker nor pen mode is a tool you draw with; both are
+    // toggles that happen to live in the same strip.
+    const isActive =
+      t.id === 'icon-picker' ? isIconPickerOpen
+      : t.id === 'penmode' ? isPenMode
+      : tool === t.id;
 
     const handleClick = (e: React.MouseEvent) => {
       e.stopPropagation();
-      
+
       if (t.id === 'icon-picker') {
         setIconPickerOpen(!isIconPickerOpen);
         return;
       }
-      
+
+      if (t.id === 'penmode') {
+        toggleInputMode();
+        return;
+      }
+
       setTool(t.id as import('@/types').Tool);
 
       if (t.id === ShapeType.FREEHAND) {

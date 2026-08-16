@@ -9,7 +9,6 @@ import { StatusBar } from '@/components/shared/StatusBar';
 import { MainMenu } from '@/components/shared/MainMenu';
 import { ExportDialog } from '@/components/shared/ExportDialog';
 import { HelpDialog } from '@/components/shared/HelpDialog';
-import { InputModeToggle } from '@/components/ui/InputModeToggle';
 import { useKeyboardShortcuts } from '@/hooks/useKeyboardShortcuts';
 import { useUIStore } from '@/store/ui-store';
 
@@ -37,7 +36,6 @@ export default function BoardPage() {
       {/* Canvas fills the whole screen */}
       <Canvas />
 
-      <InputModeToggle />
 
       {/* Status bar */}
       <StatusBar />
