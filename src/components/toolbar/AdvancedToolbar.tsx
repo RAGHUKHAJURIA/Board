@@ -33,6 +33,8 @@ import {
   Lasso,
   StickyNote,
   PenTool,
+  Lock,
+  Unlock,
 } from 'lucide-react';
 import { ShapeType } from '@/types';
 
@@ -577,10 +579,20 @@ export function AdvancedToolbar() {
   const isPenMode = inputMode.mode === 'pen';
   const showsPenMode = inputMode.isTouchDevice || inputMode.isTablet;
 
+  const toolLocked = useCanvasStore((state) => state.toolLocked);
+  const toggleToolLocked = useCanvasStore((state) => state.toggleToolLocked);
+
   const tools = [
     { id: 'select', icon: MousePointer, label: 'Select (V)' },
     { id: 'lasso', icon: Lasso, label: 'Lasso select (Q)' },
     { id: 'hand', icon: Hand, label: 'Hand (H)' },
+    {
+      id: 'toollock',
+      icon: toolLocked ? Lock : Unlock,
+      label: toolLocked
+        ? 'Tool stays active after drawing'
+        : 'Tool reverts to select after drawing',
+    },
     null,
     // The six shapes live behind one button now — as a flat list they were a
     // third of the toolbar's height on their own.
@@ -652,6 +664,7 @@ export function AdvancedToolbar() {
     const isActive =
       t.id === 'icon-picker' ? isIconPickerOpen
       : t.id === 'penmode' ? isPenMode
+      : t.id === 'toollock' ? toolLocked
       : tool === t.id;
 
     const handleClick = (e: React.MouseEvent) => {
@@ -664,6 +677,11 @@ export function AdvancedToolbar() {
 
       if (t.id === 'penmode') {
         toggleInputMode();
+        return;
+      }
+
+      if (t.id === 'toollock') {
+        toggleToolLocked();
         return;
       }
 

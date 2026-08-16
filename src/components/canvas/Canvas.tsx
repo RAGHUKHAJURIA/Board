@@ -2031,6 +2031,23 @@ export function Canvas() {
     lastPointerWorldPos.current = world;
   };
 
+  /**
+   * A drawing tool is a one-shot: after you use it, the selection tool comes
+   * back and the thing you just drew is selected, so you can immediately move
+   * or restyle it. Excalidraw's rule (App.tsx), including its exceptions:
+   *
+   *   !toolLocked && activeTool !== "freedraw" && ...
+   *
+   * The padlock keeps the tool active for repeated drawing, and freedraw never
+   * reverts — the whole point of the pen is drawing stroke after stroke.
+   */
+  const revertToSelection = useCallback((drawnElementId?: string) => {
+    const store = useCanvasStore.getState();
+    if (store.toolLocked) return;
+    if (drawnElementId) store.selectElements([drawnElementId]);
+    store.setTool('select');
+  }, []);
+
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const handlePointerUp = (e: React.PointerEvent) => {
     // Touch lifecycle (including gesture teardown) is owned by the native
@@ -2058,7 +2075,8 @@ export function Canvas() {
     if (prevMode === 'drawing' || prevMode === 'freehand') {
       const el = currentElementRef.current;
       // Remove zero-size elements (just a click) — shape drawing only
-      if (el && Math.abs(el.width) < 2 && Math.abs(el.height) < 2 && el.type !== ShapeType.FREEHAND) {
+      const discarded = !!el && Math.abs(el.width) < 2 && Math.abs(el.height) < 2 && el.type !== ShapeType.FREEHAND;
+      if (discarded && el) {
         deleteElements([el.id]);
         clearSelection();
       }
@@ -2068,17 +2086,20 @@ export function Canvas() {
         finalizeActiveStroke('pointer-up');
         return; // finalizeActiveStroke handles mode reset
       }
+      if (prevMode === 'drawing' && !discarded && el) revertToSelection(el.id);
       currentElementRef.current = null;
     }
 
     if (prevMode === 'connector-draw') {
       useCanvasStore.getState().setHoveredBindTarget(null);
       const el = currentElementRef.current as ConnectorElement;
-      if (el && Math.hypot(el.endX - el.startX, el.endY - el.startY) < 5) {
+      const tooShort = !!el && Math.hypot(el.endX - el.startX, el.endY - el.startY) < 5;
+      if (tooShort && el) {
         deleteElements([el.id]);
         clearSelection();
       }
       saveSnapshot();
+      if (!tooShort && el) revertToSelection(el.id);
       currentElementRef.current = null;
       resizeElementIdRef.current = null;
       connectorHandleIndexRef.current = null;

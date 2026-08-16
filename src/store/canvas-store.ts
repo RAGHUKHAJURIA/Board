@@ -52,6 +52,12 @@ interface CanvasState {
   invertElementColors: (fromTheme: 'light' | 'dark', toTheme: 'light' | 'dark') => void;
   setIsInteracting: (val: boolean) => void;
   setTool: (tool: Tool) => void;
+  /**
+   * The padlock. When off, a drawing tool reverts to selection after one use
+   * (Excalidraw's default); when on, it stays active for repeated drawing.
+   */
+  toolLocked: boolean;
+  toggleToolLocked: () => void;
   addElement: (element: WhiteboardElement) => void;
   updateElement: (id: string, updates: Partial<WhiteboardElement>) => void;
   deleteElements: (ids: string[]) => void;
@@ -414,6 +420,12 @@ export const useCanvasStore = create<CanvasState>()(
         pushHistory(state);
         state.elements = newElements;
       }
+    }),
+
+    toolLocked: false,
+
+    toggleToolLocked: () => set((state) => {
+      state.toolLocked = !state.toolLocked;
     }),
 
     setTool: (tool) => set((state) => {
@@ -1189,6 +1201,8 @@ export const useCanvasStore = create<CanvasState>()(
       canvasBackground: state.canvasBackground,
       isCanvasBackgroundCustomized: state.isCanvasBackgroundCustomized,
       viewport: state.viewport,
+      // The padlock is a preference, so it should outlive a reload.
+      toolLocked: state.toolLocked,
     }),
     // Re-hydrate Sets/Maps since JSON stringify strips them.
     // If background was never customized, re-derive it from the persisted theme.
